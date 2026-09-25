@@ -30,7 +30,7 @@ class RuntimeTests(unittest.TestCase):
             shutil.rmtree(directory)
 
     def test_loader_update_and_failure_paths(self):
-        self.execute("loader_cases.lua", "--[[LOADER]]", (ROOT / "loader.lua").read_text(encoding="utf-8"), "LOADER_TESTS_PASSED 10")
+        self.execute("loader_cases.lua", "--[[LOADER]]", (ROOT / "loader.lua").read_text(encoding="utf-8"), "LOADER_TESTS_PASSED 24")
 
     def test_local_backend_download_cancel_and_diagnostics(self):
         source = (ROOT / "src/backend.lua").read_text(encoding="utf-8")
