@@ -1,0 +1,11 @@
+{
+  "project": "jpeg-js",
+  "upstream_repository": "https://github.com/jpeg-js/jpeg-js",
+  "commit": "1031ccd7a63c641c16afb2430279d1598530a85c",
+  "source_file": "lib/decoder.js",
+  "source_url": "https://raw.githubusercontent.com/jpeg-js/jpeg-js/1031ccd7a63c641c16afb2430279d1598530a85c/lib/decoder.js",
+  "source_sha256": "5d66421bc6987757cf6230cfe422755fcbc5e674598b7c23ee0b8dbab1255e4c",
+  "source_license": "Apache-2.0 (decoder.js file header); upstream repository BSD license also retained",
+  "port_file": "../../local_jpeg_decoder.lua",
+  "network_at_runtime": false
+}

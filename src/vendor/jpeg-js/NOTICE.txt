@@ -1,0 +1,43 @@
+JPEG decoder attribution
+
+The pure-Luau decoder in ../../local_jpeg_decoder.lua adapts the entropy
+decoder and progressive JPEG state machine from jpeg-js/lib/decoder.js.
+
+Upstream: https://github.com/jpeg-js/jpeg-js
+Pinned commit: 1031ccd7a63c641c16afb2430279d1598530a85c
+Source file: lib/decoder.js
+
+Copyright 2011 notmasteryet
+Licensed under the Apache License, Version 2.0.
+The full license is included as LICENSE-APACHE-2.0.txt.
+
+The upstream repository also includes a BSD license:
+Copyright (c) 2014, Eugene Ware. All rights reserved.
+Its complete notice and terms are retained in LICENSE-UPSTREAM-BSD.txt.
+
+The port is modified from the upstream JavaScript: strict bounds and format
+validation, flat Luau buffers, canonical Huffman decoding, a separable
+floating-point inverse DCT, cooperative checkpoints, EXIF orientation,
+and RGBA output. It contains no runtime networking or downloaded code.
+
+Supported: 8-bit Huffman baseline, extended sequential, and progressive
+single-frame JPEG; grayscale, YCbCr and RGB; common chroma subsampling;
+restart markers; EXIF orientation values 1-8.
+
+Unsupported formats are rejected: CMYK/YCCK, arithmetic coding, lossless
+JPEG, precision other than 8 bits, and changes to a component's active
+quantization table. ICC profiles are not applied. Chroma upsampling is
+nearest-neighbor, so subsampled color edges can differ from Pillow/libjpeg's
+smoothed output. Images without EXIF orientation keep their encoded layout.
+
+Limits: 10 MiB compressed input, 4096 pixels per axis, 4194304 pixels total,
+96 MiB explicitly accounted input/coefficient/sample/output storage,
+96 scans, 2048 markers, 256 total Huffman/quantization table definitions,
+and 134217728 coefficient-work units.
+These limits can reject unusually complex otherwise-valid JPEG files.
+Small tables and interpreter/runtime overhead are additional to the
+explicitly accounted buffer storage. Checkpoints allow the caller to
+yield or cancel parsing, entropy decoding, IDCT and RGBA conversion.
+
+decoder.reference.js is the unmodified pinned reference for auditing.
+source.json records its SHA-256. It is not loaded or executed at runtime.
