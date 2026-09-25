@@ -66,7 +66,7 @@ local qualityPresets = {
 }
 local previewFiles, activePreviewPath = Backend.previewFiles(), nil
 local chosenCount = 0
-local api = {Version = "3.0"}
+local api = {Version = "3.0.1"}
 ENV.ImageBuilder = api
 
 local C = {
@@ -598,7 +598,8 @@ end
 -- Restore only this app's validated preview journal; never enumerate other files.
 for _, path in ipairs(table.clone(previewFiles)) do deletePreviewFile(path) end
 local function loadNativePreview(imagePlan, expectedGeneration)
-    local assetFn = getcustomasset or getsynasset
+    local assetFn = type(getcustomasset) == "function" and getcustomasset
+        or (type(getsynasset) == "function" and getsynasset)
     local id = imagePlan.id
     if type(writefile) ~= "function" or type(delfile) ~= "function" or type(assetFn) ~= "function"
         or type(id) ~= "string" or #id ~= 24 or not id:match("^[0-9a-fA-F]+$") then return end
@@ -612,17 +613,8 @@ local function loadNativePreview(imagePlan, expectedGeneration)
         if type(bytes) ~= "string" or #bytes > 4 * 1024 * 1024
             or bytes:sub(1, 8) ~= "\137PNG\13\10\26\10" then return end
         local folder = "baft image builder"
-        local folderExists = false
-        if type(isfolder) == "function" then
-            local checkOK, exists = pcall(isfolder, folder)
-            folderExists = checkOK and exists == true
-        end
         if not current() then return end
-        if not folderExists then
-            if type(makefolder) ~= "function" then return end
-            pcall(makefolder, folder)
-            if not current() then return end
-        end
+        -- The loader has already verified this executor-relative folder.
         -- Keep at most three locally written preview files, even without delfile.
         while #previewFiles >= 3 do
             local victim

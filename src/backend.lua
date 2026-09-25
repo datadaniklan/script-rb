@@ -4,7 +4,14 @@ local Planner = __IMAGE_PLANNER__
 local Backend = {}
 local FOLDER = "baft image builder"
 local HttpService = game:GetService("HttpService")
-local send = (syn and syn.request) or request or http_request or (http and http.request)
+local function firstFunction(...)
+    for index = 1, select("#", ...) do
+        local value = select(index, ...)
+        if type(value) == "function" then return value end
+    end
+end
+local send = firstFunction(request, http_request,
+    type(syn) == "table" and syn.request, type(http) == "table" and http.request)
 local imageRequestPending = false
 local previewID, previewBytes
 local MAX_BYTES = 10 * 1024 * 1024
@@ -40,9 +47,9 @@ local function download(url, checkpoint)
     end
     checkpoint()
     if not ok or type(response) ~= "table" then error("Could not download the image. Check the direct image link.", 0) end
-    local status = tonumber(response.StatusCode or response.Status or response.status_code) or 0
+    local status = tonumber(response.StatusCode) or tonumber(response.Status) or tonumber(response.status_code) or 0
     if status < 200 or status >= 300 then error("Image download returned HTTP " .. status .. ". Use a direct PNG or JPEG link.", 0) end
-    local bytes = response.Body or response.body
+    local bytes = type(response.Body) == "string" and response.Body or response.body
     if type(bytes) ~= "string" or #bytes == 0 then error("The image download was empty.", 0) end
     if #bytes > MAX_BYTES then error("Image is larger than 10 MiB. Use a smaller source image.", 0) end
     return bytes
