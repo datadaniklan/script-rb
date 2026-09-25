@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.runtime-test-*/
+.gui-test-*/
+.decoder-test-*/
+.planner-test-*/
+.jpeg-test-*/
