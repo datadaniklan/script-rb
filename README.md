@@ -10,7 +10,9 @@ Paste this line into a compatible Roblox executor:
 loadstring(game:HttpGet("https://raw.githubusercontent.com/datadaniklan/script-rb/main/loader.lua"))()
 ```
 
-The loader automatically creates **`baft image builder`** inside the executor's workspace, downloads the current release, checks that it compiles, verifies the written cache, and opens the interface. In Wave, the usual location is `%LOCALAPPDATA%\Wave\Workspace\baft image builder`. Other executors choose their own workspace location.
+The loader automatically creates **`baft image builder`** inside the **current executor's own workspace**, downloads the current release, checks that it compiles, verifies the written cache, and opens the interface. The executor determines the real workspace location; the script does not contain a Wave directory or Windows username.
+
+All filesystem paths are relative, such as `baft image builder/builder_a.lua`. Startup checks that the folder can actually be written and read. If `isfolder` is unavailable, or `makefolder` reports that the folder already exists, the write/read check still determines whether startup can continue. An already-created writable folder also works without `makefolder`.
 
 1. Paste a **direct PNG or JPEG image URL**.
 2. Choose wall width, resolution, material, and quality. Select **Convert image**.
@@ -30,7 +32,7 @@ Run the same link again to obtain the latest published version. A saved `baft im
 
 ## Compatibility and limits
 
-The executor needs HTTP `request`, `loadstring`, Luau `buffer` and `bit32`, and workspace `readfile`, `writefile`, `isfolder`, and `makefolder`. `getcustomasset` and `delfile` enable the detailed preview; without them, the interface uses a coarse preview. Files are never written outside `baft image builder` by the standalone package.
+The executor needs a callable HTTP function named `request`, `http_request`, `syn.request`, or `http.request`; `loadstring`; Luau `buffer` and `bit32`; and workspace `readfile` and `writefile`. `makefolder` is needed to create the folder on first use; `isfolder` is optional. Non-function aliases are skipped. `getcustomasset` or `getsynasset`, together with `delfile`, enables the detailed preview; otherwise the interface uses a coarse preview. The one-line online launcher also uses `game:HttpGet`. Files are never written outside `baft image builder` by the standalone package.
 
 PNG and common 8-bit baseline/progressive RGB or grayscale JPEG are decoded locally. JPEG EXIF orientation is applied. WebP, AVIF, GIF, CMYK/YCCK, arithmetic/lossless JPEG and 12-bit JPEG are unsupported and produce an explanatory error. Image profiles are not color-managed. Use a direct image link, not a webpage or Google Images results page.
 

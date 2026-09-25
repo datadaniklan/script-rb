@@ -1,6 +1,8 @@
 # Release verification
 
-Version 3.0.0, prepared 2026-09-25.
+Version 3.0.1, prepared 2026-09-25.
+
+The 3.0.1 compatibility update uses executor-relative paths throughout, tests HTTP aliases by function capability, accepts numeric HTTP status variants, and verifies workspace write/read access even when `isfolder` is missing. Tests simulate different workspace roots; they do not certify a particular executor or mobile platform. A small `workspace-check.txt` file is removed after a successful probe when `delfile` is available.
 
 The release is built from the public source tree. It includes all PNG and JPEG license notices inside the downloaded bundle as well as in the repository. A publish allowlist and local scan exclude private pairing tokens, personal Windows paths, generated private loaders, local server configuration, recorder data, and recovered third-party scripts.
 

@@ -50,7 +50,7 @@ def build() -> Path:
     destination = ROOT / "dist" / f"builder_{build_id}.lua"
     destination.write_text(output, encoding="utf-8", newline="\n")
     data = destination.read_bytes()
-    manifest = {"format": 1, "version": "3.0.0", "build": build_id, "bytes": len(data),
+    manifest = {"format": 1, "version": "3.0.1", "build": build_id, "bytes": len(data),
                 "sha256": hashlib.sha256(data).hexdigest()}
     (ROOT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n")
     return destination

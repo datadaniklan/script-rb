@@ -1,5 +1,6 @@
 -- BAFT Image Builder bootstrap. Downloads only this repository's versioned bundle.
 local ROOT = "https://raw.githubusercontent.com/datadaniklan/script-rb/main/"
+-- Relative to the current executor's workspace; never a Wave/Windows path.
 local FOLDER = "baft image builder"
 local MAX_SOURCE = 3 * 1024 * 1024
 local env = (getgenv and getgenv()) or _G
@@ -7,18 +8,40 @@ if env.BAFTImageLoaderBusy then warn("Image Builder is already loading."); retur
 env.BAFTImageLoaderBusy = true
 
 local ok, failure = pcall(function()
-    local send = (syn and syn.request) or request or http_request or (http and http.request)
-    assert(type(send) == "function", "An executor HTTP request function is required.")
-    assert(type(loadstring) == "function" and type(readfile) == "function" and type(writefile) == "function"
-        and type(makefolder) == "function" and type(isfolder) == "function",
-        "This executor needs loadstring, readfile, writefile, makefolder, and isfolder.")
+    local function firstFunction(...)
+        for index = 1, select("#", ...) do
+            local value = select(index, ...)
+            if type(value) == "function" then return value end
+        end
+    end
+    local send = firstFunction(request, http_request,
+        type(syn) == "table" and syn.request, type(http) == "table" and http.request)
+    assert(send, "This executor needs request, http_request, syn.request, or http.request.")
+    assert(type(loadstring) == "function" and type(readfile) == "function" and type(writefile) == "function",
+        "This executor needs loadstring and workspace readfile and writefile functions.")
     assert(type(buffer) == "table" and type(buffer.create) == "function", "Luau buffer support is required.")
+    -- Some executors omit isfolder or throw when makefolder finds an existing
+    -- folder. Verify the real filesystem operation instead of testing a brand.
+    local exists = false
+    if type(isfolder) == "function" then
+        local checked, found = pcall(isfolder, FOLDER)
+        exists = checked and found == true
+    end
+    if not exists and type(makefolder) == "function" then pcall(makefolder, FOLDER) end
+    local probe = FOLDER .. "/workspace-check.txt"
+    local marker = "BAFT Image Builder workspace check\n"
+    local writable, verified = pcall(function()
+        writefile(probe, marker)
+        return readfile(probe) == marker
+    end)
+    assert(writable and verified, "Cannot write and read 'baft image builder' in this executor's workspace. Check its file-access support.")
+    if type(delfile) == "function" then pcall(delfile, probe) end
     local function get(path, maximum)
         local response = send({Url = ROOT .. path, Method = "GET", Timeout = 30})
         assert(type(response) == "table", "GitHub did not return a response.")
-        local status = tonumber(response.StatusCode or response.Status or response.status_code) or 0
+        local status = tonumber(response.StatusCode) or tonumber(response.Status) or tonumber(response.status_code) or 0
         assert(status == 200, "GitHub download failed (HTTP " .. status .. "). Try again later.")
-        local body = response.Body or response.body
+        local body = type(response.Body) == "string" and response.Body or response.body
         assert(type(body) == "string" and #body > 0 and #body <= maximum, "Empty or oversized GitHub response.")
         return body
     end
@@ -35,8 +58,6 @@ local ok, failure = pcall(function()
     assert(source:match("^%-%- BAFT Image Builder release ([0-9a-f]+)\n") == build, "Bundle release mismatch.")
     local run, syntaxError = loadstring(source, "BAFTImageBuilder/" .. build)
     assert(run, "Downloaded bundle did not compile: " .. tostring(syntaxError))
-    if not isfolder(FOLDER) then makefolder(FOLDER) end
-    assert(isfolder(FOLDER), "Could not create the baft image builder workspace folder.")
     local activeOK, active = pcall(readfile, FOLDER .. "/active.txt")
     local previousSlot = activeOK and (active == "a" or active == "b") and active or nil
     local nextSlot = previousSlot == "a" and "b" or "a"
