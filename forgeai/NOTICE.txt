@@ -1,0 +1,11 @@
+ForgeAI client and relay
+Copyright (c) 2026 datadaniklan. All rights reserved.
+
+Permission is granted to download and run this release for personal use.
+No permission to redistribute modified copies or sell this software is granted.
+
+The client is distributed in obfuscated form. Obfuscation is reversible and does
+not prevent recovery of the source or establish a security boundary.
+
+This preview is supplied without warranty. OpenAI, Roblox, and Build A Boat For
+Treasure are separate products; ForgeAI is not their official application.
