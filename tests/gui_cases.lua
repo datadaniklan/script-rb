@@ -1,12 +1,14 @@
 -- Only the real option callback and beginBuild run here. No Roblox or remotes.
-local function context()
+local function context(settings)
+    settings = settings or {}
     --[[INITIAL_OPTION]]
     local processing, building, cancelled, destroyed = false, false, false, false
     local plan = {placement_count = 1, block_count = 1}
     local blockMenu, speedMenu = {Visible = true}, {Visible = true}
     local infiniteButton = {Activated = {}, Text = "initial"}
     local C = {red = "red", green = "green", text = "text", yellow = "yellow", dim = "dim"}
-    local calls, queue, telemetry = {}, {}, {}
+    local calls, queue, telemetry, progressCalls, snapshots = {}, {}, {}, {}, {}
+    local Backend = {progress = function(value) table.insert(snapshots, value) end}
     local validations, click = 0, nil
     local Adapter = {
         validate = function(value)
@@ -17,6 +19,12 @@ local function context()
         build = function(value, origin, options)
             assert(value == plan)
             table.insert(calls, {origin = origin, options = options})
+            if settings.wallProgress then
+                options.onProgress(20, 100, "Verified image blocks", {kind = "wall", elapsed = 2, pending = 4})
+            end
+            if settings.error then error("Fixture build failure") end
+            if settings.nonTable then return nil end
+            if settings.partial then return {ok = false, completed = 20, total = 100, message = "Stopped"} end
             return {ok = true, completed = 1, total = 1}
         end,
     }
@@ -32,7 +40,9 @@ local function context()
     local function refreshInventory() end
     local UI, phaseLabel, progressFill = {}, {}, {}
     local function resetProgress(phase) phaseLabel.Text = phase end
-    local function showBuildProgress() end
+    local function showBuildProgress(done, total, phase, elapsed)
+        table.insert(progressCalls, {done = done, total = total, phase = phase, elapsed = elapsed})
+    end
     local function showPreparationProgress() end
     local function safeError(value) return tostring(value) end
     local function sendTelemetry(value, ok, result, mode, enabled, buildSpeed)
@@ -57,7 +67,7 @@ local function context()
         flush = function()
             while #queue > 0 do table.remove(queue, 1)() end
         end,
-        calls = calls, telemetry = telemetry,
+        calls = calls, telemetry = telemetry, progressCalls = progressCalls, snapshots = snapshots,
     }
 end
 
@@ -132,6 +142,30 @@ test("a queued build blocks a second build and user option change", function()
     assert(#ctx.calls == 1)
     ctx.click()
     assert(ctx.enabled() == false)
+end)
+
+test("live wall progress passes placement elapsed and marks the local run finished", function()
+    local ctx = context({wallProgress = true})
+    ctx.begin({}); ctx.flush()
+    local found
+    for _, value in ipairs(ctx.progressCalls) do
+        if value.done == 20 then found = value end
+    end
+    assert(found and found.elapsed == 2 and found.total == 100)
+    assert(ctx.snapshots[1].state == "starting")
+    assert(ctx.snapshots[2].state == "running" and ctx.snapshots[2].details.elapsed == 2)
+    assert(ctx.snapshots[#ctx.snapshots].state == "finished")
+    assert(ctx.snapshots[#ctx.snapshots].outcome == "complete")
+end)
+
+test("terminal snapshots distinguish a partial stop and an unverified error", function()
+    for _, entry in ipairs({{partial = true, expected = "stopped"}, {error = true, expected = "unverified"},
+        {nonTable = true, expected = "unverified"}}) do
+        local ctx = context(entry)
+        ctx.begin({}); ctx.flush()
+        local snapshot = ctx.snapshots[#ctx.snapshots]
+        assert(snapshot.state == "finished" and snapshot.outcome == entry.expected)
+    end
 end)
 
 local function conversionContext()

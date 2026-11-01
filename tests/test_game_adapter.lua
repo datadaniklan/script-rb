@@ -1964,7 +1964,7 @@ test("Luau.pro preserves place paint resize order with drained50 cohorts and150 
     equal(result.diagnostics.placement_cohorts, 11); equal(result.diagnostics.resize_windows, 5)
     equal(result.diagnostics.pipeline_windows, 2); equal(result.diagnostics.peak_geometry_jobs, 300)
     assert(ctx.maxRemoteCalls <= 64 and ctx.maxRemoteCalls > 1)
-    equal(ctx.maxPaintCalls, 1); equal(sharedEnvironment.__ImageBuilderFlight.pending, 0)
+    equal(ctx.maxPaintCalls, 4); equal(sharedEnvironment.__ImageBuilderFlight.pending, 0)
     local painted, scaled = {}, {}
     for _, model in ipairs(ctx.painted) do assert(not painted[model]); painted[model] = true end
     for _, model in ipairs(ctx.scaled) do assert(not scaled[model]); scaled[model] = true end
@@ -2412,6 +2412,118 @@ test("Luau.pro wall admission grows on healthy replies within600 and64 ceilings"
     assert(result.diagnostics.effective_request_rate > 120 and result.diagnostics.effective_request_rate <= 600)
     assert(result.diagnostics.worker_limit > 16 and result.diagnostics.worker_limit <= 64)
     assert(ctx.maxRemoteCalls <= 64)
+end)
+
+test("Luau.pro overlaps at mostfour disjoint32-block paint payloads and drains all before resize", function()
+    local painted = {}
+    local ctx = context({stock = 1000, returnNil = true,
+        remoteDelay = function(_, stage) return stage == "paint" and 0.35 or 0.1 end,
+        onDispatch = function(c, stage, args)
+            if stage == "paint" then
+                assert(#args[1] <= 32)
+                for _, entry in ipairs(args[1]) do
+                    equal(entry[1].Parent, c.folder); assert(not painted[entry[1]])
+                    painted[entry[1]] = true
+                end
+            elseif stage == "scale" then
+                equal(c.activePaintCalls or 0, 0)
+                assert(painted[args[1]], "Each block must be painted before resize")
+            end
+        end})
+    local result = run(function() return ctx.adapter.build(gridPlan(601), CFrame.new(), {speed = "Luau.pro"}) end)
+    assert(result.ok, result.message); equal(result.completed, 601)
+    equal(ctx.maxPaintCalls, 4); assert(ctx.maxRemoteCalls <= 64)
+    equal(#ctx.painted, 601); equal(#ctx.scaled, 601); equal(ctx.counters.paint, 21)
+end)
+
+test("Luau.pro rejected concurrent paint chunk drains other replies and blocks bulk resizing", function()
+    local ctx = context({stock = 1000, remoteDelay = 0.3,
+        onDispatch = function(_, stage, _, count)
+            if stage == "paint" and count == 3 then error("one paint chunk rejected") end
+        end})
+    local result = run(function() return ctx.adapter.build(gridPlan(301), CFrame.new(), {speed = "Luau.pro"}) end)
+    equal(result.ok, false); equal(result.completed, 1); equal(ctx.counters.scale, 1)
+    has(result.message, "one paint chunk rejected")
+    equal(ctx.activePaintCalls, 0); equal(sharedEnvironment.__ImageBuilderFlight.pending, 0)
+    assert(ctx.counters.paint < 11, "The failed window must not admit every queued paint payload")
+    equal(ctx.maxPaintCalls, 4); local calls = #ctx.calls
+    drain(); equal(#ctx.calls, calls); equal(ctx.tools.paint.Parent, ctx.backpack)
+end)
+
+test("Luau.pro one uncertain paint chunk holds tools and blocks resize without retries", function()
+    local ctx = context({stock = 1000, remoteDelay = 0.1, onDispatch = function(_, stage, _, count)
+        if stage == "paint" and count == 2 then task.wait(20) end
+    end})
+    local result = run(function() return ctx.adapter.build(gridPlan(301), CFrame.new(), {speed = "Luau.pro"}) end)
+    equal(result.ok, false); equal(result.completed, 1); equal(ctx.counters.scale, 1)
+    equal(sharedEnvironment.__ImageBuilderFlight.pending, 1); equal(ctx.adapter.validate(plan()), false)
+    equal(result.diagnostics.tool_restore_pending, true); equal(ctx.tools.paint.Parent, ctx.character)
+    local count = #ctx.calls
+    drain(); equal(#ctx.calls, count); equal(ctx.counters.scale, 1)
+    equal(sharedEnvironment.__ImageBuilderFlight.pending, 0); equal(sharedEnvironment.__ImageBuilderFlight.busy, false)
+    equal(ctx.tools.paint.Parent, ctx.backpack); equal(ctx.scripts.paint.Disabled, false)
+end)
+
+test("Luau.pro manual selection during concurrent painting drains before native activation", function()
+    local ctx = context({stock = 1000, remoteDelay = 0.3})
+    local getter = nativeControllers(ctx)
+    ctx.settings.afterPaint = function(c, count)
+        if count == 2 then c.selection = {revision = 1, tool = c.tools.build, available = true} end
+    end
+    ctx.onNativeEquip = function(stage)
+        if stage == "build" then equal(sharedEnvironment.__ImageBuilderFlight.pending, 0); ctx.applied = true end
+    end
+    local result = run(function() return ctx.adapter.build(gridPlan(301), CFrame.new(),
+        {speed = "Luau.pro", getManualToolSelection = getter}) end)
+    assert(result.ok, result.message); equal(ctx.applied, true); assert(result.diagnostics.manual_drains > 0)
+    equal(ctx.nativeActive.build, true); equal(ctx.tools.build.Parent, ctx.character)
+    equal(ctx.maxPaintCalls, 4); equal(result.completed, 301)
+end)
+
+test("Luau.pro wall progress uses its own start time and continues through slow paint replies", function()
+    local ctx = context({stock = 1000, remoteDelay = function(_, stage) return stage == "paint" and 6 or 0.1 end})
+    local events = {}
+    local result = run(function()
+        task.wait(10) -- Earlier UI/conversion time must not reduce wall speed.
+        return ctx.adapter.build(plan(1), CFrame.new(), {speed = "Luau.pro",
+            onProgress = function(done, _, _, detail)
+                if detail and detail.kind == "wall" then
+                    table.insert(events, {at = clock, done = done, detail = table.clone(detail)})
+                end
+            end})
+    end)
+    assert(result.ok, result.message); assert(#events >= 6)
+    local paintEvents, previous = {}, nil
+    for _, event in ipairs(events) do
+        local detail = event.detail
+        near(detail.elapsed, event.at - 10)
+        if previous then
+            assert(detail.elapsed >= previous.elapsed)
+            assert(detail.requestsSent >= previous.requestsSent)
+            assert(detail.completedRequests >= previous.completedRequests)
+        end
+        previous = detail
+        assert(detail.completedRequests <= detail.requestsSent)
+        if detail.phase == "painting" then table.insert(paintEvents, event) end
+    end
+    assert(#paintEvents >= 3)
+    for index = 2, #paintEvents do assert(paintEvents[index].at - paintEvents[index - 1].at >= 2 - 0.000001) end
+    equal(paintEvents[2].detail.pending, 1); equal(paintEvents[2].detail.completedRequests, 1)
+    near(paintEvents[2].detail.rpcMeanSeconds, 0.1)
+    near(events[#events].detail.elapsed, result.diagnostics.wall_elapsed_seconds)
+    equal(events[#events].detail.created, 1); equal(events[#events].detail.completedRequests, 3)
+end)
+
+test("Luau.pro cancellation during parallel paint drains sent chunks without resizing or further dispatch", function()
+    local ctx = context({stock = 1000, remoteDelay = 0.3, afterPaint = function(c, count)
+        if count == 2 then c.cancel = true end
+    end})
+    local result = run(function() return ctx.adapter.build(gridPlan(301), CFrame.new(), {speed = "Luau.pro",
+        shouldCancel = function() return ctx.cancel == true end}) end)
+    equal(result.ok, false); equal(result.completed, 1); equal(ctx.counters.scale, 1)
+    assert(ctx.counters.paint <= 5); equal(sharedEnvironment.__ImageBuilderFlight.pending, 0)
+    local count = #ctx.calls
+    drain(); equal(#ctx.calls, count); equal(ctx.tools.paint.Parent, ctx.backpack)
 end)
 
 print("MOCK_GAME_ADAPTER_TESTS_PASSED " .. tostring(tests))

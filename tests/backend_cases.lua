@@ -2,6 +2,8 @@ local count = 0
 local function scenario(options)
     options = options or {}
     local files, decoded, converted, requests, cancelled = {}, false, false, 0, false
+    local now, encoded = 0, {}
+    local os = {clock = function() return now end, time = function() return 10000 + math.floor(now) end}
     local task = {spawn = function(fn) fn() end, wait = function() end}
     local function request(data)
         requests += 1
@@ -13,7 +15,10 @@ local function scenario(options)
     local function writefile(path, value) files[path] = value end
     local game = {GetService = function()
         return {GenerateGUID = function() return "12345678-1234-1234-1234-123456789abc" end,
-            JSONEncode = function(_, value) return "safe-local-report" end}
+            JSONEncode = function(_, value)
+                table.insert(encoded, value)
+                return value.kind == "builder_progress" and "progress-" .. value.sequence or "safe-local-report"
+            end}
     end}
     local TestDecoder = {
         decode = function(bytes, hooks)
@@ -48,6 +53,25 @@ local function scenario(options)
         assert(Backend.preview("other") == nil)
         assert(files["baft image builder/source_image.bin"] == "valid-image-bytes")
         Backend.report({result = {ok = true}})
+        assert(files["baft image builder/last-report.json"] == "safe-local-report")
+        Backend.progress({state = "starting", completed = 0, total = 100,
+            image_url = "private", run_started_clock = now})
+        assert(files["baft image builder/live-progress.json"] == "progress-1")
+        Backend.progress({state = "running", completed = 10, total = 100})
+        assert(files["baft image builder/live-progress.json"] == "progress-1")
+        now = 2
+        Backend.progress({state = "running", completed = 20, total = 100, details = {
+            kind = "wall", elapsed = 1, pending = 4, requestRate = 120, workerLimit = 16,
+            rpcMeanSeconds = 0.2, requestsSent = 55, completedRequests = 51, secret = "omit",
+            created = math.huge}})
+        assert(files["baft image builder/live-progress.json"] == "progress-2")
+        local live = encoded[#encoded]
+        assert(live.completed == 20 and live.details.elapsed == 1 and live.details.workerLimit == 16)
+        assert(live.details.secret == nil and live.details.created == nil and live.image_url == nil)
+        assert(live.updated_unix == 10002 and live.details.rpcMeanSeconds == 0.2)
+        Backend.progress({state = "finished", outcome = "stopped", completed = 20, total = 100})
+        assert(files["baft image builder/live-progress.json"] == "progress-3")
+        assert(encoded[#encoded].state == "finished" and encoded[#encoded].outcome == "stopped")
         assert(files["baft image builder/last-report.json"] == "safe-local-report")
     end
     assert(requests <= 1, "Must never send diagnostics or retries to an external server")

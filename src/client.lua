@@ -66,7 +66,7 @@ local qualityPresets = {
 }
 local previewFiles, activePreviewPath = Backend.previewFiles(), nil
 local chosenCount = 0
-local api = {Version = "3.0.1"}
+local api = {Version = "3.1.2"}
 ENV.ImageBuilder = api
 
 local C = {
@@ -1003,6 +1003,8 @@ local function beginBuild(origin)
     building, cancelled = true, false
     resetProgress(buildInfiniteBlocks and "CHECKING MATERIAL" or "BUILDING YOUR WALL")
     UI.startedAt = os.clock()
+    pcall(Backend.progress, {state = "starting", version = api.Version, speed = buildSpeed,
+        completed = 0, total = buildPlan.placement_count or buildPlan.block_count, run_started_clock = UI.startedAt})
     showBuildProgress(0, buildPlan.placement_count or buildPlan.block_count, phaseLabel.Text)
     blockMenu.Visible, speedMenu.Visible = false, false
     setStatus(buildToolMode == "compatible"
@@ -1021,15 +1023,27 @@ local function beginBuild(origin)
                 if destroyed then return end
                 local text = tostring(message or "")
                 local preparing = done == 0 and (text:lower():find("prepar", 1, true) or text:lower():find("material", 1, true))
-                showBuildProgress(done, total, cancelled and "STOPPING" or (preparing and "PREPARING MATERIAL" or "BUILDING YOUR WALL"))
+                local wallElapsed = type(details) == "table" and details.kind == "wall" and details.elapsed or nil
+                showBuildProgress(done, total, cancelled and "STOPPING" or (preparing and "PREPARING MATERIAL" or "BUILDING YOUR WALL"), wallElapsed)
                 if type(details) == "table" and details.kind == "preparation" then
                     showPreparationProgress(details, cancelled and "STOPPING" or "PREPARING MATERIAL")
                 end
                 setStatus(text ~= "" and text or "Waiting for the next verified block...", cancelled and C.yellow or C.dim)
+                pcall(Backend.progress, {state = "running", version = api.Version, speed = buildSpeed,
+                    completed = done, total = total, run_started_clock = UI.startedAt, details = details})
             end,
         })
         stopManualSelection()
         building = false
+        local finalDiagnostics = type(result) == "table" and result.diagnostics or nil
+        pcall(Backend.progress, {state = "finished", version = api.Version, speed = buildSpeed,
+            outcome = ok and type(result) == "table" and (result.ok == true and "complete" or "stopped") or "unverified",
+            completed = type(result) == "table" and result.completed or 0,
+            total = buildPlan.placement_count or buildPlan.block_count, run_started_clock = UI.startedAt,
+            details = type(finalDiagnostics) == "table" and {kind = "wall", phase = finalDiagnostics.phase,
+                elapsed = finalDiagnostics.wall_elapsed_seconds, created = result.created,
+                requestsSent = finalDiagnostics.requests_sent, completedRequests = finalDiagnostics.rpc_completed,
+                rpcMeanSeconds = finalDiagnostics.rpc_latency_mean_seconds} or nil})
         sendTelemetry(buildPlan, ok, result, buildToolMode, buildInfiniteBlocks, buildSpeed)
         if destroyed then
             if Adapter.teardown then pcall(Adapter.teardown) end

@@ -154,6 +154,44 @@ function Backend.savePreviewFiles(paths)
     return ok and verified
 end
 
+local lastProgressWrite = -math.huge
+local progressSequence = 0
+function Backend.progress(snapshot)
+    if type(writefile) ~= "function" or type(snapshot) ~= "table" then return end
+    local state = snapshot.state
+    if state ~= "starting" and state ~= "running" and state ~= "finished" then return end
+    local now = os.clock()
+    if state == "running" and now - lastProgressWrite < 2 then return end
+    lastProgressWrite = now
+    progressSequence += 1
+    local record = {kind = "builder_progress", state = state, sequence = progressSequence,
+        version = tostring(snapshot.version or ""):sub(1, 32),
+        speed = tostring(snapshot.speed or ""):sub(1, 32),
+        updated_unix = type(os.time) == "function" and os.time() or nil}
+    if state == "finished" then
+        record.outcome = snapshot.outcome == "complete" and "complete"
+            or snapshot.outcome == "stopped" and "stopped" or "unverified"
+    end
+    local function finite(target, source, keys)
+        for _, key in ipairs(keys) do
+            local value = tonumber(source[key])
+            if value and value == value and math.abs(value) < math.huge then target[key] = value end
+        end
+    end
+    finite(record, snapshot, {"completed", "total", "run_started_clock"})
+    local details = snapshot.details
+    if type(details) == "table" then
+        local detail = {kind = details.kind == "wall" and "wall" or details.kind == "preparation" and "preparation" or "unknown",
+            phase = tostring(details.phase or ""):sub(1, 80)}
+        finite(detail, details, {"elapsed", "created", "pending", "requestRate", "workerLimit", "rpcMeanSeconds",
+            "requestsSent", "completedRequests", "available", "required", "sent", "completed", "planned"})
+        record.details = detail
+    end
+    -- Separate from the completed-run report; never uploads or records image URLs.
+    local encoded = HttpService:JSONEncode(record)
+    if #encoded <= 16 * 1024 then writefile(FOLDER .. "/live-progress.json", encoded) end
+end
+
 function Backend.report(report)
     -- Bounded local diagnostics only: no server, URLs, account IDs, or game-job IDs.
     if type(writefile) ~= "function" then return end

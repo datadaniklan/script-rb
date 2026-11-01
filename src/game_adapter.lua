@@ -190,7 +190,8 @@ function Adapter.build(plan, origin, options)
     local speedMode = toolMode == "compatible" and (selectedSpeed == "Rapid" or selectedSpeed == "Luau.pro")
         and "Fast" or selectedSpeed
     local speed = presets[speedMode]
-    local wallStarted
+    local wallStarted, wallLastReport, wallMessage
+    local wallRpcAtStart, wallLatencyAtStart, wallSentAtStart = 0, 0, 0
     local completed, created, nextSend, failure = 0, 0, 0, nil
     local folder, zone, character = ownFolder(), getZone(), player.Character
     local originalTeam = player.TeamColor
@@ -245,7 +246,22 @@ function Adapter.build(plan, origin, options)
         return destroyed or failure ~= nil or shouldCancel() or contextChanged()
     end
     local function report(message, detail)
+        if not detail and wallStarted then
+            local replied = diagnostics.rpc_completed - wallRpcAtStart
+            detail = {kind = "wall", elapsed = math.max(0, os.clock() - wallStarted), created = created,
+                pending = flight.pending, requestRate = diagnostics.effective_request_rate,
+                workerLimit = diagnostics.worker_limit,
+                rpcMeanSeconds = replied > 0 and (diagnostics.rpc_latency_total_seconds - wallLatencyAtStart) / replied or 0,
+                phase = diagnostics.phase, requestsSent = diagnostics.requests_sent - wallSentAtStart,
+                completedRequests = replied}
+            wallLastReport, wallMessage = os.clock(), message
+        end
         pcall(progress, completed, #items, message, detail)
+    end
+    local function wallProgress()
+        if wallStarted and (not wallLastReport or os.clock() - wallLastReport >= 2) then
+            report(wallMessage or "Waiting for image block replies...")
+        end
     end
     local function fail(message)
         failure = failure or message
@@ -767,7 +783,7 @@ function Adapter.build(plan, origin, options)
             if flight.pending == 0 and restoreAfterPending then restoreAfterPending() end
         end)
         local deadline = os.clock() + 12
-        while not finished and os.clock() < deadline do preparationProgress(); task.wait(0.03) end
+        while not finished and os.clock() < deadline do preparationProgress(); wallProgress(); task.wait(0.03) end
         if not finished then
             return fail("The game has not answered a request. Stopped without retrying; it may still finish later.")
         end
@@ -783,6 +799,7 @@ function Adapter.build(plan, origin, options)
             local value = predicate()
             if value then return value end
             if stopped() then return nil end
+            wallProgress()
             task.wait(0.03)
         until os.clock() >= deadline
         return nil
@@ -880,7 +897,7 @@ function Adapter.build(plan, origin, options)
                 running -= 1
             end)
         end
-        while running > 0 do preparationProgress(); task.wait(0.03) end
+        while running > 0 do preparationProgress(); wallProgress(); task.wait(0.03) end
         return not stopped()
     end
 
@@ -1396,14 +1413,22 @@ function Adapter.build(plan, origin, options)
         report("Painting the identified image blocks...")
         remote = ownedRemote("PaintingTool")
         if not remote then return false end
+        local paintPayloads = {}
         for offset = 1, #jobs, speed.paint do
             local payload = {}
             for index = offset, math.min(#jobs, offset + speed.paint - 1) do
                 table.insert(payload, {jobs[index].model, jobs[index].color})
             end
-            diagnostics.pipeline_paint_batches += 1
-            if not invoke(remote, payload) then return false end
+            table.insert(paintPayloads, payload)
         end
+        -- Payloads contain disjoint, already identified owned blocks. Allow
+        -- four paint replies to overlap, then drain all before any resizing.
+        -- The shared admission, ownership, cancellation and timeout checks
+        -- still apply to every dispatch.
+        if not runPool(paintPayloads, function(payload)
+            diagnostics.pipeline_paint_batches += 1
+            return invoke(remote, payload)
+        end, first and 1 or 4) then return false end
         diagnostics.phase = "scaling"
         report("Resizing image windows and verifying the result...")
         remote = ownedRemote("ScalingTool")
@@ -1635,6 +1660,8 @@ function Adapter.build(plan, origin, options)
             return jobs
         end
         wallStarted = os.clock()
+        wallRpcAtStart, wallLatencyAtStart, wallSentAtStart = diagnostics.rpc_completed,
+            diagnostics.rpc_latency_total_seconds, diagnostics.requests_sent
         -- Prove this server accepts all three operations before concurrent work.
         if speedMode == "Luau.pro" then
             if not doLuauWindow(makeBatch(1, 1), true) then return end
