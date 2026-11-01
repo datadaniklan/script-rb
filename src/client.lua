@@ -66,7 +66,7 @@ local qualityPresets = {
 }
 local previewFiles, activePreviewPath = Backend.previewFiles(), nil
 local chosenCount = 0
-local api = {Version = "3.1.3"}
+local api = {Version = "3.1.4"}
 ENV.ImageBuilder = api
 
 local C = {
@@ -844,6 +844,9 @@ local function sendTelemetry(buildPlan, ok, result, buildToolMode, buildInfinite
             peak_pending = tonumber(diag.peak_pending),
             wall_elapsed_seconds = tonumber(diag.wall_elapsed_seconds),
             verified_blocks_per_second = tonumber(diag.verified_blocks_per_second),
+            wall_rpc_completed = tonumber(diag.wall_rpc_completed),
+            wall_requests_sent = tonumber(diag.wall_requests_sent),
+            wall_rpc_latency_mean_seconds = tonumber(diag.wall_rpc_latency_mean_seconds),
             manual_selection_supported = diag.manual_selection_supported == true,
             manual_tool_name = safeError(diag.manual_tool_name or ""),
             manual_selection_revision = tonumber(diag.manual_selection_revision),
@@ -1045,8 +1048,9 @@ local function beginBuild(origin)
             total = buildPlan.placement_count or buildPlan.block_count, run_started_clock = UI.startedAt,
             details = type(finalDiagnostics) == "table" and {kind = "wall", phase = finalDiagnostics.phase,
                 elapsed = finalDiagnostics.wall_elapsed_seconds, created = result.created,
-                requestsSent = finalDiagnostics.requests_sent, completedRequests = finalDiagnostics.rpc_completed,
-                rpcMeanSeconds = finalDiagnostics.rpc_latency_mean_seconds} or nil})
+                requestsSent = finalDiagnostics.wall_requests_sent or finalDiagnostics.requests_sent,
+                completedRequests = finalDiagnostics.wall_rpc_completed or finalDiagnostics.rpc_completed,
+                rpcMeanSeconds = finalDiagnostics.wall_rpc_latency_mean_seconds or finalDiagnostics.rpc_latency_mean_seconds} or nil})
         sendTelemetry(buildPlan, ok, result, buildToolMode, buildInfiniteBlocks, buildSpeed)
         if destroyed then
             if Adapter.teardown then pcall(Adapter.teardown) end

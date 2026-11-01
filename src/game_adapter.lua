@@ -1447,14 +1447,13 @@ function Adapter.build(plan, origin, options)
             end
             table.insert(paintPayloads, payload)
         end
-        -- Payloads contain disjoint, already identified owned blocks. Allow
-        -- four paint replies to overlap, then drain all before any resizing.
-        -- The shared admission, ownership, cancellation and timeout checks
-        -- still apply to every dispatch.
+        -- The server paint handler may share state between requests. Finish
+        -- each 32-model payload before the next, and all painting before resize.
+        -- Ownership, cancellation and uncertain-reply checks still apply.
         if not runPool(paintPayloads, function(payload)
             diagnostics.pipeline_paint_batches += 1
             return invoke(remote, payload)
-        end, first and 1 or 4) then return false end
+        end, 1) then return false end
         diagnostics.phase = "scaling"
         report("Resizing image windows and verifying the result...")
         remote = ownedRemote("ScalingTool")
@@ -1779,6 +1778,10 @@ function Adapter.build(plan, origin, options)
     diagnostics.wall_elapsed_seconds = wallStarted and math.max(0, os.clock() - wallStarted) or 0
     diagnostics.verified_blocks_per_second = diagnostics.wall_elapsed_seconds > 0
         and completed / diagnostics.wall_elapsed_seconds or 0
+    diagnostics.wall_rpc_completed = wallStarted and diagnostics.rpc_completed - wallRpcAtStart or 0
+    diagnostics.wall_requests_sent = wallStarted and diagnostics.requests_sent - wallSentAtStart or 0
+    diagnostics.wall_rpc_latency_mean_seconds = diagnostics.wall_rpc_completed > 0
+        and (diagnostics.rpc_latency_total_seconds - wallLatencyAtStart) / diagnostics.wall_rpc_completed or 0
     diagnostics.rpc_latency_mean_seconds = diagnostics.rpc_completed > 0
         and diagnostics.rpc_latency_total_seconds / diagnostics.rpc_completed or 0
     return {ok = success, message = status, completed = completed, total = #items, created = created,

@@ -402,6 +402,7 @@ test("preparation reports preserve measured gains and bound per-round diagnostic
         prep_stop_reason = "round_limit", prep_samples = samples,
         speed_mode = "Rapid", effective_request_rate = 600, peak_pending = 42,
         wall_elapsed_seconds = 12.5, verified_blocks_per_second = 0,
+        wall_rpc_completed = 50, wall_requests_sent = 51, wall_rpc_latency_mean_seconds = 0.18,
         pipeline_version = 1, pipeline_windows = 4, pipeline_peak_ready = 64, pipeline_peak_active = 768,
         pipeline_paint_batches = 25, manual_drains = 2, rpc_completed = 2000,
         rpc_latency_total_seconds = 800, rpc_latency_max_seconds = 0.75, rpc_latency_mean_seconds = 0.4,
@@ -422,6 +423,7 @@ test("preparation reports preserve measured gains and bound per-round diagnostic
     assert(diag.prep_gain == 16 and diag.prep_stop_reason == "round_limit")
     assert(body.settings.speed == "Rapid" and diag.speed_mode == "Rapid" and diag.effective_request_rate == 600)
     assert(diag.peak_pending == 42 and diag.wall_elapsed_seconds == 12.5 and diag.verified_blocks_per_second == 0)
+    assert(diag.wall_rpc_completed == 50 and diag.wall_requests_sent == 51 and diag.wall_rpc_latency_mean_seconds == 0.18)
     assert(diag.pipeline_version == 1 and diag.pipeline_windows == 4 and diag.pipeline_peak_active == 768)
     assert(diag.pipeline_peak_ready == 64 and diag.pipeline_paint_batches == 25 and diag.manual_drains == 2)
     assert(diag.rpc_completed == 2000 and diag.rpc_latency_total_seconds == 800)
