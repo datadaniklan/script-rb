@@ -33,6 +33,7 @@ local function context()
     local UI, phaseLabel, progressFill = {}, {}, {}
     local function resetProgress(phase) phaseLabel.Text = phase end
     local function showBuildProgress() end
+    local function showPreparationProgress() end
     local function safeError(value) return tostring(value) end
     local function sendTelemetry(value, ok, result, mode, enabled, buildSpeed)
         table.insert(telemetry, {plan = value, ok = ok, result = result, mode = mode, enabled = enabled, speed = buildSpeed})
@@ -304,7 +305,8 @@ local function progressContext()
     local UDim2 = {fromScale = function(x, y) return {x = x, y = y} end}
     local os = {clock = function() return 20 end}
     --[[PROGRESS]]
-    return {reset = resetProgress, show = showBuildProgress, state = UI, fill = progressFill, count = progressCount, meta = progressMeta}
+    return {reset = resetProgress, show = showBuildProgress, prepare = showPreparationProgress,
+        state = UI, fill = progressFill, count = progressCount, meta = progressMeta, phase = phaseLabel}
 end
 test("progress uses verified counts and measured rate", function()
     local ctx = progressContext(); ctx.reset(); ctx.state.startedAt = 10
@@ -328,6 +330,20 @@ test("material phase explains preparation without showing a placement rate", fun
     local ctx = progressContext(); ctx.reset(); ctx.state.startedAt = 10
     ctx.show(0, 60430, "PREPARING MATERIAL")
     assert(ctx.fill.Size.x == 0 and ctx.meta.Text == "Checking available material before wall placement...")
+end)
+
+test("preparation progress shows actual inventory and returned checks instead of a wall rate", function()
+    local ctx = progressContext(); ctx.reset()
+    ctx.prepare({kind = "preparation", available = 14479, required = 141015,
+        completed = 36, planned = 100, pending = 64, elapsed = 4.8})
+    assert(ctx.count.Text == "14479 / 141015")
+    assert(math.abs(ctx.fill.Size.x - 14479 / 141015) < 1e-9)
+    assert(ctx.meta.Text == "Material checks: 36 / 100  |  64 pending  |  4s elapsed")
+    assert(ctx.phase.Text == "PREPARING MATERIAL" and not ctx.meta.Text:find("blocks/s", 1, true))
+    ctx.prepare({kind = "preparation", available = 14479, required = 141015,
+        completed = 100, planned = 100, pending = 0, elapsed = 9}, "STOPPING")
+    assert(ctx.phase.Text == "STOPPING" and ctx.fill.Size.x < 1)
+    assert(ctx.state.completed == 0)
 end)
 
 local function telemetryContext()
@@ -392,18 +408,36 @@ end)
 test("Luau.pro reports retain staged work and inventory before cleanup", function()
     local ctx = telemetryContext()
     ctx.send({placement_count = 452}, true, {ok = true, completed = 452, diagnostics = {
-        speed_mode = "Luau.pro", pipeline_version = 3, prep_version = 3,
+        speed_mode = "Luau.pro", pipeline_version = 3, prep_version = 4,
         placement_cohorts = 11, resize_windows = 5, inventory_before_cleanup = 510,
         inventory_after = 511, preparation_request_rate = 120,
-        prep_samples = {{before = 1, after = 510, requests = 6, gain = 509, cohort_limit = 100}},
+        prep_scale_completed = 100, prep_planned = 1279, prep_pending = 0, prep_pending_limit = 100,
+        prep_elapsed = 9.2, prep_net_gain = 0, prep_probe_calls = 100, prep_probe_available = 14479,
+        prep_probe_net_gain = 0, prep_pacing = "bounded_same_turn_cohort", prep_helper_present = false,
+        prep_inventory_initial = {stock = 14479, used = 0, available = 14479, secret = "omit"},
+        prep_inventory_before_cleanup = {stock = 14479, used = 1, available = 14478},
+        prep_inventory_after_cleanup = {stock = 14479, used = 0, available = 14479},
+        prep_helper_size = {x = 390.632, y = 2048, z = 1.1755e-38},
+        prep_helper_position = {x = 12, y = -250000, z = 34},
+        prep_response_types = {scale = {["nil"] = 99, error = 1, unexpected = 200}},
+        prep_samples = {{before = 1, after = 510, requests = 6, gain = 509, cohort_limit = 100,
+            completed = 6, baseline = 1, net_gain = 509, snapshot_after_cleanup = {stock = 511, used = 0, available = 511}}},
     }}, "background", true, "Luau.pro")
     local body = ctx.sent[1]
     local diag = body.result.diagnostics
     assert(body.settings.speed == "Luau.pro" and diag.speed_mode == "Luau.pro")
-    assert(diag.pipeline_version == 3 and diag.prep_version == 3)
+    assert(diag.pipeline_version == 3 and diag.prep_version == 4)
     assert(diag.placement_cohorts == 11 and diag.resize_windows == 5)
     assert(diag.inventory_before_cleanup == 510 and diag.inventory_after == 511)
     assert(diag.preparation_request_rate == 120 and diag.prep_samples[1].cohort_limit == 100)
+    assert(diag.prep_scale_completed == 100 and diag.prep_planned == 1279 and diag.prep_pending_limit == 100)
+    assert(diag.prep_elapsed == 9.2 and diag.prep_net_gain == 0 and diag.prep_probe_net_gain == 0)
+    assert(diag.prep_inventory_initial.secret == nil and diag.prep_inventory_initial.available == 14479)
+    assert(diag.prep_inventory_before_cleanup.available == 14478 and diag.prep_inventory_after_cleanup.available == 14479)
+    assert(diag.prep_helper_size.z == 1.1755e-38 and diag.prep_helper_position.y == -250000)
+    assert(diag.prep_response_types.scale["nil"] == 99 and diag.prep_response_types.scale.error == 1)
+    assert(diag.prep_response_types.scale.unexpected == nil and diag.prep_helper_present == false)
+    assert(diag.prep_samples[1].snapshot_after_cleanup.available == 511 and diag.prep_samples[1].completed == 6)
 end)
 
 local function speedContext()

@@ -1,6 +1,10 @@
 # Release verification
 
-Version 3.1.0, prepared 2026-11-01.
+Version 3.1.1, prepared 2026-11-01.
+
+The reported live 3.1.0 attempt never reached image placement: it needed 141,015 material, began and ended with 14,479, and completed 187 preparation scale calls before cancellation. Its first estimated round had 1,279 calls, but the UI showed no progress within that round. This establishes zero net gain for that attempt, not failure of the original Luau.pro method; the user reports that the original still works.
+
+The 3.1.1 correction restores simultaneous dispatch within each preparation group, adds progress while requests are pending, measures net gain before extending the first group, and separates helper refunds from material gains. The original can overlap groups without joining every callback; this adapter deliberately tracks and drains each group, with at most 100 preparation requests pending. Wall dispatch now adapts to response latency. Local timing simulations can verify these scheduling and lifecycle properties; they do not establish the current game's material response.
 
 The 3.1.0 image-builder update adds a Luau.pro profile to the independent game adapter. It ports shared-helper material top-ups and staged placement, paint and resize from the recovered source descriptions. The original Luau.pro VM, factory and unresolved authorizer/reconciler are not executed or included. The prior Rapid, Turbo, Fast and Normal paths remain available. The AI builder is outside this release.
 
@@ -13,8 +17,8 @@ The release is built from the public source tree. It includes all PNG and JPEG l
 Automated checks run with the official Luau CLI and Python/Pillow:
 
 - Complete bundled client, adapter, planner, decoder and loader syntax/compilation.
-- 148 simulated adapter scenarios: all 118 prior cases plus 30 for the Luau.pro port. They cover phase order across multiple image windows, placement/resize cohort bounds, one shared preparation helper, round and request limits, inventory before and after cleanup, cancellation, ownership changes, missing/rejected/late replies, manual tool selection and final size/color checks. These use local doubles and send no live game requests.
-- 31 interface logic scenarios covering options, placement rotation/origin, cancellation, progress, reload behavior, normal hotbar selection, the new default and local diagnostics.
+- 156 simulated adapter scenarios: all 118 original cases, 30 Luau.pro cases updated for the corrected behavior, and eight new regressions. These include a same-turn concurrency-dependent mock, the observed no-surplus inventory sequence, a late reply within a 100-call group, progress during slow replies, separate cleanup accounting and adaptive wall admission. Phase order, ownership, final geometry/color checks and cancellation remain covered. These use local doubles and send no live game requests.
+- 32 interface logic scenarios covering options, placement rotation/origin, cancellation, progress, reload behavior, normal hotbar selection, the new default, live material counters and bounded local diagnostics.
 - 34 PNG/wrapper cases, including color types, filters, interlacing, checksums, malformed files, memory bounds, cancellation, and independently verified preview PNG output.
 - 14 JPEG test methods using synthetic Pillow fixtures: baseline/progressive, grayscale/RGB, subsampling, odd dimensions, restart markers, EXIF orientations 1–8, malformed data, scan/table limits, cancellation and cooperative yielding. Lossy output is checked with appropriate tolerance; it is not claimed identical to libjpeg's chroma smoothing.
 - 26 planner scenarios, including exact Source RGB, 250,000-cell plans, alpha-aware filters, palettes, non-overlapping rectangle reconstruction, transparency, preview bounds, cancellation and work limits.

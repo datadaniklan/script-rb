@@ -290,6 +290,19 @@ local function showBuildProgress(done, total, phase, wallElapsed)
         progressMeta.Text = "Waiting for verified placements..."
     end
 end
+local function showPreparationProgress(details, phase)
+    if type(details) ~= "table" or details.kind ~= "preparation" then return end
+    local available = math.max(0, tonumber(details.available) or 0)
+    local required = math.max(0, tonumber(details.required) or 0)
+    local completed = math.max(0, tonumber(details.completed) or 0)
+    local planned = math.max(completed, tonumber(details.planned) or 0)
+    local pending = math.max(0, tonumber(details.pending) or 0)
+    phaseLabel.Text = phase or "PREPARING MATERIAL"
+    progressCount.Text = string.format("%.0f / %.0f", available, required)
+    progressFill.Size = UDim2.fromScale(required > 0 and math.clamp(available / required, 0, 1) or 0, 1)
+    progressMeta.Text = string.format("Material checks: %d / %d  |  %d pending  |  %ds elapsed",
+        completed, planned, pending, math.max(0, math.floor(tonumber(details.elapsed) or 0)))
+end
 local function fitPanel(keepPosition)
     local view = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize or viewport
     local scale = math.max(0.2, math.min(1, (view.X - 24) / UI.width, (view.Y - 24) / 520))
@@ -764,6 +777,16 @@ local function mouseOverPanel()
         and mouse.Y >= position.Y and mouse.Y <= position.Y + size.Y
 end
 local function sendTelemetry(buildPlan, ok, result, buildToolMode, buildInfiniteBlocks, buildSpeed)
+    local function numericFields(value, keys)
+        if type(value) ~= "table" then return nil end
+        local copy = {}
+        for _, key in ipairs(keys) do
+            local number = tonumber(value[key])
+            if number and number == number and math.abs(number) < math.huge then copy[key] = number end
+        end
+        return copy
+    end
+    local inventoryKeys = {"stock", "used", "available"}
     local report = type(result) == "table" and {
         ok = result.ok == true, message = safeError(result.message or ""),
         completed = tonumber(result.completed) or 0,
@@ -789,10 +812,29 @@ local function sendTelemetry(buildPlan, ok, result, buildToolMode, buildInfinite
             inventory_before_cleanup = tonumber(diag.inventory_before_cleanup),
             inventory_after = tonumber(diag.inventory_after),
             preparation_request_rate = tonumber(diag.preparation_request_rate),
+            preparation_worker_limit = tonumber(diag.preparation_worker_limit),
+            preparation_cohorts = tonumber(diag.preparation_cohorts),
             prep_requests = tonumber(diag.prep_requests),
             prep_version = tonumber(diag.prep_version),
             prep_rounds = tonumber(diag.prep_rounds),
             prep_scale_requests = tonumber(diag.prep_scale_requests),
+            prep_scale_completed = tonumber(diag.prep_scale_completed),
+            prep_planned = tonumber(diag.prep_planned),
+            prep_pending = tonumber(diag.prep_pending),
+            prep_pending_limit = tonumber(diag.prep_pending_limit),
+            prep_elapsed = tonumber(diag.prep_elapsed),
+            prep_net_gain = tonumber(diag.prep_net_gain),
+            prep_probe_calls = tonumber(diag.prep_probe_calls),
+            prep_probe_available = tonumber(diag.prep_probe_available),
+            prep_probe_net_gain = tonumber(diag.prep_probe_net_gain),
+            prep_pacing = safeError(diag.prep_pacing or ""),
+            prep_helper_present = diag.prep_helper_present,
+            prep_helper_size = numericFields(diag.prep_helper_size, {"x", "y", "z"}),
+            prep_helper_position = numericFields(diag.prep_helper_position, {"x", "y", "z"}),
+            prep_inventory_initial = numericFields(diag.prep_inventory_initial, inventoryKeys),
+            prep_inventory_current = numericFields(diag.prep_inventory_current, inventoryKeys),
+            prep_inventory_before_cleanup = numericFields(diag.prep_inventory_before_cleanup, inventoryKeys),
+            prep_inventory_after_cleanup = numericFields(diag.prep_inventory_after_cleanup, inventoryKeys),
             prep_gain = tonumber(diag.prep_gain),
             prep_stop_reason = safeError(diag.prep_stop_reason or ""),
             preparation_status = safeError(diag.preparation_status or ""),
@@ -842,6 +884,13 @@ local function sendTelemetry(buildPlan, ok, result, buildToolMode, buildInfinite
             verification_up_dot = tonumber(diag.verification_up_dot),
             verification_wait_seconds = tonumber(diag.verification_wait_seconds),
         }
+        if type(diag.prep_response_types) == "table" then
+            report.diagnostics.prep_response_types = {}
+            for _, stage in ipairs({"build", "scale", "delete"}) do
+                report.diagnostics.prep_response_types[stage] = numericFields(diag.prep_response_types[stage],
+                    {"nil", "boolean", "number", "string", "Instance", "table", "error"})
+            end
+        end
         if type(diag.prep_samples) == "table" then
             report.diagnostics.prep_samples = {}
             for index = 1, math.min(#diag.prep_samples, 32) do
@@ -851,6 +900,10 @@ local function sendTelemetry(buildPlan, ok, result, buildToolMode, buildInfinite
                         before = tonumber(sample.before), after = tonumber(sample.after),
                         requests = tonumber(sample.requests), gain = tonumber(sample.gain),
                         cohort_limit = tonumber(sample.cohort_limit),
+                        completed = tonumber(sample.completed), baseline = tonumber(sample.baseline),
+                        net_gain = tonumber(sample.net_gain),
+                        snapshot_before_cleanup = numericFields(sample.snapshot_before_cleanup, inventoryKeys),
+                        snapshot_after_cleanup = numericFields(sample.snapshot_after_cleanup, inventoryKeys),
                     })
                 end
             end
@@ -964,11 +1017,14 @@ local function beginBuild(origin)
             infiniteBlocks = buildInfiniteBlocks,
             getManualToolSelection = getManualToolSelection,
             shouldCancel = function() return cancelled or destroyed end,
-            onProgress = function(done, total, message)
+            onProgress = function(done, total, message, details)
                 if destroyed then return end
                 local text = tostring(message or "")
                 local preparing = done == 0 and (text:lower():find("prepar", 1, true) or text:lower():find("material", 1, true))
                 showBuildProgress(done, total, cancelled and "STOPPING" or (preparing and "PREPARING MATERIAL" or "BUILDING YOUR WALL"))
+                if type(details) == "table" and details.kind == "preparation" then
+                    showPreparationProgress(details, cancelled and "STOPPING" or "PREPARING MATERIAL")
+                end
                 setStatus(text ~= "" and text or "Waiting for the next verified block...", cancelled and C.yellow or C.dim)
             end,
         })

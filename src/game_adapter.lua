@@ -184,7 +184,7 @@ function Adapter.build(plan, origin, options)
     local presets = {Normal = {rate = 8, workers = 1, batch = 4},
         Fast = {rate = 60, workers = 4, batch = 32}, Turbo = {rate = 120, workers = 8, batch = 64},
         Rapid = {rate = 120, workers = 16, maxRate = 600, maxWorkers = 64, batch = 256, cohort = 16, paint = 32},
-        ["Luau.pro"] = {rate = 600, workers = 64, maxRate = 600, maxWorkers = 64,
+        ["Luau.pro"] = {rate = 120, workers = 16, maxRate = 600, maxWorkers = 64,
             batch = 300, cohort = 50, paint = 32, resize = 150}}
     local selectedSpeed = presets[options.speed] and options.speed or "Fast"
     local speedMode = toolMode == "compatible" and (selectedSpeed == "Rapid" or selectedSpeed == "Luau.pro")
@@ -202,6 +202,8 @@ function Adapter.build(plan, origin, options)
     local preparing, cleanupMode, helper, helperPossible = false, false, nil, false
     local deleteAttempted = false
     local originalHeld, lastPrepTool, restoreAfterPending, prepSample
+    local prepStarted, prepEnded, prepLastReport = nil, nil, -math.huge
+    local prepBurstActive, prepBurstLimit = false, 100
     local holder
     local pipelineActive, dispatchReservations, manualDrain = false, 0, false
     local dispatchTokens, tokenUpdatedAt = 12, os.clock()
@@ -223,7 +225,11 @@ function Adapter.build(plan, origin, options)
         observed_new_models = 0, observed_material_models = 0, returned_type = "none",
         infinite_requested = options.infiniteBlocks == true, material_required = required,
         inventory_before = Adapter.available(plan.block_type), prep_requests = 0,
-        prep_version = speedMode == "Luau.pro" and 3 or 2,
+        prep_version = speedMode == "Luau.pro" and 4 or 2,
+        prep_scale_completed = 0, prep_planned = 0, prep_elapsed = 0, prep_pending = 0,
+        prep_response_types = {build = {}, scale = {}, delete = {}},
+        prep_pending_limit = speedMode == "Luau.pro" and 100 or speed.workers,
+        prep_pacing = speedMode == "Luau.pro" and "bounded_same_turn_cohort" or "serial",
         prep_rounds = 0, prep_scale_requests = 0, prep_gain = 0, prep_samples = {}}
     local adaptive = {rate = speed.rate, workers = speed.workers, latency = nil, recentMax = 0,
         healthyCalls = 0, nextIncrease = os.clock() + 3, lastDecrease = -math.huge,
@@ -238,8 +244,8 @@ function Adapter.build(plan, origin, options)
         if cleanupMode then return contextChanged() or flight.pending > 0 end
         return destroyed or failure ~= nil or shouldCancel() or contextChanged()
     end
-    local function report(message)
-        pcall(progress, completed, #items, message)
+    local function report(message, detail)
+        pcall(progress, completed, #items, message, detail)
     end
     local function fail(message)
         failure = failure or message
@@ -252,7 +258,7 @@ function Adapter.build(plan, origin, options)
         diagnostics.adaptive_peak_workers = math.max(diagnostics.adaptive_peak_workers, workers)
     end
     local function slowDown()
-        if speedMode ~= "Rapid" then return end
+        if speedMode ~= "Rapid" and speedMode ~= "Luau.pro" then return end
         local now = os.clock()
         adaptive.nextIncrease = now + 5
         adaptive.healthyCalls = 0
@@ -266,7 +272,7 @@ function Adapter.build(plan, origin, options)
         end
     end
     local function observeLatency(elapsed)
-        if speedMode ~= "Rapid" or preparing then return end
+        if speedMode ~= "Rapid" and speedMode ~= "Luau.pro" or preparing then return end
         adaptive.latency = adaptive.latency and adaptive.latency * 0.8 + elapsed * 0.2 or elapsed
         adaptive.recentMax = math.max(elapsed, adaptive.recentMax * 0.98)
         diagnostics.rpc_latency_ewma_seconds = adaptive.latency
@@ -278,6 +284,49 @@ function Adapter.build(plan, origin, options)
         local budget = math.max(8, math.min(24, 4 + (adaptive.latency or 0) * 4 + adaptive.recentMax * 1.5))
         diagnostics.verification_budget_seconds = math.max(diagnostics.verification_budget_seconds, budget)
         return budget
+    end
+    local function growLuauLimits()
+        if speedMode ~= "Luau.pro" or preparing or not adaptive.latency or adaptive.latency >= 0.45
+            or adaptive.healthyCalls < 16 or os.clock() < adaptive.nextIncrease then return end
+        local rate, workers = math.min(speed.maxRate, adaptive.rate + 40), math.min(speed.maxWorkers, adaptive.workers + 4)
+        if rate ~= adaptive.rate or workers ~= adaptive.workers then
+            setAdaptiveLimits(rate, workers)
+            diagnostics.adaptive_upshifts += 1
+        end
+        adaptive.nextIncrease, adaptive.healthyCalls = os.clock() + 3, 0
+    end
+    local function inventorySnapshot()
+        local data = player:FindFirstChild("Data")
+        local value = data and data:FindFirstChild(plan.block_type)
+        local used = value and value:FindFirstChild("Used")
+        return {stock = stock(plan.block_type), used = used and tonumber(used.Value) or 0,
+            available = Adapter.available(plan.block_type)}
+    end
+    local function samplePreparation()
+        if speedMode ~= "Luau.pro" or not prepStarted then return end
+        diagnostics.prep_elapsed = math.max(0, (prepEnded or os.clock()) - prepStarted)
+        if prepEnded then return end
+        diagnostics.prep_pending = flight.pending
+        diagnostics.prep_inventory_current = inventorySnapshot()
+        local part = helper and helper:FindFirstChild("PPart")
+        diagnostics.prep_helper_present = helper ~= nil and helper.Parent == folder
+        if part and part:IsA("BasePart") then
+            diagnostics.prep_helper_size = {x = part.Size.X, y = part.Size.Y, z = part.Size.Z}
+            diagnostics.prep_helper_position = {x = part.Position.X, y = part.Position.Y, z = part.Position.Z}
+        end
+    end
+    local function preparationProgress()
+        if speedMode ~= "Luau.pro" or not preparing or not prepStarted or os.clock() - prepLastReport < 0.5 then return end
+        prepLastReport = os.clock()
+        samplePreparation()
+        diagnostics.preparation_request_rate = 120
+        diagnostics.preparation_worker_limit = prepBurstLimit
+        local detail = {kind = "preparation", available = Adapter.available(plan.block_type), required = required,
+            sent = diagnostics.prep_scale_requests, completed = diagnostics.prep_scale_completed,
+            planned = diagnostics.prep_planned, pending = flight.pending, elapsed = diagnostics.prep_elapsed,
+            round = diagnostics.prep_rounds, rate = diagnostics.preparation_request_rate}
+        report(string.format("Preparing material: %d/%d checks replied, %d sent; %d pending; %.3f/%d available; %.1fs (%d/s average pacing)",
+            detail.completed, detail.planned, detail.sent, detail.pending, detail.available, required, detail.elapsed, detail.rate), detail)
     end
     -- Reserve exact owned instances, not every tool with a matching name. Direct
     -- parenting leaves tools available for remotes. Only an explicitly selected
@@ -582,6 +631,18 @@ function Adapter.build(plan, origin, options)
     -- cancels those reservations, drains only already dispatched requests, then
     -- changes native controllers before any new request may start.
     local function awaitDispatch(remote)
+        if prepBurstActive then
+            if not preparing or speedMode ~= "Luau.pro" or cleanupMode or not remote or not remote.Parent
+                or remote.Parent.Name ~= "ScalingTool" then
+                return fail("Unexpected request inside a material preparation cohort. Stopped.")
+            end
+            -- A source-shaped cohort enters in one scheduler turn. Its caller
+            -- owns the finite cohort cap and paces the next cohort only after
+            -- all replies drain. Ordinary per-call pacing would change this
+            -- method's concurrency semantics.
+            if flight.pending >= prepBurstLimit then return fail("Preparation cohort capacity was exceeded. Stopped before sending another request.") end
+            return not stopped()
+        end
         local placement = remote and remote.Parent and remote.Parent.Name == "BuildingTool"
         while not stopped() do
             local reserved = not pipelineActive
@@ -603,8 +664,8 @@ function Adapter.build(plan, origin, options)
             end
             if reserved then
                 local when = math.max(os.clock(), nextSend)
-                local requestRate = preparing and math.min(speed.rate, 120)
-                    or speedMode == "Rapid" and adaptive.rate or speed.rate
+                local requestRate = preparing and math.min(speedMode == "Luau.pro" and adaptive.rate or speed.rate, 120)
+                    or (speedMode == "Rapid" or speedMode == "Luau.pro") and adaptive.rate or speed.rate
                 nextSend = when + 1 / requestRate
                 local delay = when - os.clock()
                 if delay > 0 then task.wait(delay) end
@@ -682,19 +743,31 @@ function Adapter.build(plan, origin, options)
             end
         end
         local invokedAt = os.clock()
+        local prepStage = preparing and (tool.Name == "BuildingTool" and "build"
+            or tool.Name == "ScalingTool" and "scale" or tool.Name == "DeleteTool" and "delete")
+        local callSample = prepSample
         task.spawn(function()
             ok, result = pcall(function() return remote:InvokeServer(table.unpack(args, 1, args.n)) end)
             local elapsed = math.max(0, os.clock() - invokedAt)
             diagnostics.rpc_completed += 1
             diagnostics.rpc_latency_total_seconds += elapsed
             diagnostics.rpc_latency_max_seconds = math.max(diagnostics.rpc_latency_max_seconds, elapsed)
-            observeLatency(elapsed)
+            if not prepStage or speedMode ~= "Luau.pro" then observeLatency(elapsed) end
+            if prepStage and speedMode == "Luau.pro" then
+                local responseType = ok and typeof(result) or "error"
+                local counts = diagnostics.prep_response_types[prepStage]
+                counts[responseType] = (counts[responseType] or 0) + 1
+                if prepStage == "scale" then
+                    diagnostics.prep_scale_completed += 1
+                    if callSample then callSample.completed = (callSample.completed or 0) + 1 end
+                end
+            end
             flight.pending -= 1
             finished = true
             if flight.pending == 0 and restoreAfterPending then restoreAfterPending() end
         end)
         local deadline = os.clock() + 12
-        while not finished and os.clock() < deadline do task.wait(0.03) end
+        while not finished and os.clock() < deadline do preparationProgress(); task.wait(0.03) end
         if not finished then
             return fail("The game has not answered a request. Stopped without retrying; it may still finish later.")
         end
@@ -807,7 +880,7 @@ function Adapter.build(plan, origin, options)
                 running -= 1
             end)
         end
-        while running > 0 do task.wait(0.03) end
+        while running > 0 do preparationProgress(); task.wait(0.03) end
         return not stopped()
     end
 
@@ -818,6 +891,7 @@ function Adapter.build(plan, origin, options)
     end
     local function restoreHeldTool()
         if not preparing then return end
+        if speedMode == "Luau.pro" then samplePreparation(); prepEnded = os.clock() end
         if holder then preparing = false; return end
         local function restore()
             if contextChanged() then return end
@@ -854,6 +928,16 @@ function Adapter.build(plan, origin, options)
         if not helperPossible then return true end
         if helper and helper.Parent == nil then helperPossible = false; return true end
         if deleteAttempted or not validHelper(helper) or contextChanged() or flight.pending > 0 then return false end
+        if speedMode == "Luau.pro" then
+            samplePreparation()
+            diagnostics.prep_inventory_before_cleanup = inventorySnapshot()
+            if prepSample then
+                prepSample.after = Adapter.available(plan.block_type)
+                prepSample.gain = prepSample.after - (prepSample.baseline or prepSample.before)
+                prepSample.net_gain = prepSample.after - diagnostics.inventory_before
+                prepSample.snapshot_before_cleanup = inventorySnapshot()
+            end
+        end
         -- Cleanup can run after cancellation, but never alongside an uncertain
         -- request. It addresses only the one positively identified new helper.
         cleanupMode = true
@@ -866,7 +950,15 @@ function Adapter.build(plan, origin, options)
             return waitFor(function() return helper.Parent ~= folder end, 5) == true
         end)
         cleanupMode = false
-        if ok and removed then helperPossible = false; return true end
+        if ok and removed then
+            helperPossible = false
+            if speedMode == "Luau.pro" then
+                diagnostics.prep_inventory_after_cleanup = inventorySnapshot()
+                diagnostics.prep_net_gain = Adapter.available(plan.block_type) - diagnostics.inventory_before
+                if prepSample then prepSample.snapshot_after_cleanup = inventorySnapshot() end
+            end
+            return true
+        end
         return false
     end
     local function prepareInventory()
@@ -902,6 +994,8 @@ function Adapter.build(plan, origin, options)
             return fail("Infinite Blocks preparation needs at most one equipped tool. Close other builders and unequip extra tools first.")
         end
         preparing = true
+        prepStarted = os.clock()
+        if speedMode == "Luau.pro" then diagnostics.prep_inventory_initial = inventorySnapshot() end
         diagnostics.preparation_status = "running"
         local cf = CFrame.new(zone.Position.X, -250000, zone.Position.Z)
             * CFrame.Angles(0, math.rad(40.135), 0)
@@ -951,8 +1045,11 @@ function Adapter.build(plan, origin, options)
                 return fail("Infinite Blocks preparation could not identify its new temporary block. No block was scaled or deleted.")
             end
             if stopped() then return false end
-            pipelineActive = true
-            local groupSize = 100
+            -- Dispatch each source-sized cohort in one scheduler turn. The
+            -- previous spaced calls changed this method's concurrency shape.
+            -- Unlike the source's fire-and-forget loop, retain a hard100-call
+            -- outstanding bound and drain every reply before another cohort.
+            local groupSize, nextCohortAt, checkedProbe, noGainProbe = 100, os.clock(), false, false
             for round = 1, 4 do
                 if stopped() then return false end
                 local roundBefore = Adapter.available(plan.block_type)
@@ -960,36 +1057,75 @@ function Adapter.build(plan, origin, options)
                 local remainingBudget = 4096 - diagnostics.prep_scale_requests
                 if remainingBudget <= 0 then break end
                 local count = math.min(math.max(1, math.ceil((required - roundBefore) / 99.0017938123301)), remainingBudget)
+                diagnostics.prep_planned = diagnostics.prep_scale_requests + count
                 diagnostics.prep_rounds = round
-                prepSample = {before = roundBefore, after = roundBefore, requests = 0, gain = 0, cohort_limit = groupSize}
+                prepSample = {before = roundBefore, baseline = round == 1 and before or roundBefore,
+                    after = roundBefore, requests = 0, completed = 0, gain = 0, cohort_limit = groupSize,
+                    inventory = inventorySnapshot()}
                 table.insert(diagnostics.prep_samples, prepSample)
                 diagnostics.phase = "preparing_scale"
-                remote = ownedRemote("ScalingTool")
-                if not remote then return false end
-                report(string.format("Preparing material: shared helper, round %d / 4; %.3f / %d available...",
-                    round, roundBefore, required))
+                preparationProgress()
                 for offset = 1, count, groupSize do
+                    while os.clock() < nextCohortAt and not stopped() do preparationProgress(); task.wait(0.03) end
+                    if stopped() then return false end
+                    -- Apply a changed native selection only between drained
+                    -- cohorts, before admitting the next simultaneous group.
+                    remote = ownedRemote("ScalingTool")
+                    if not remote then return false end
                     local calls = {}
                     for index = offset, math.min(count, offset + groupSize - 1) do table.insert(calls, index) end
-                    if not runPool(calls, function()
+                    prepBurstLimit = #calls
+                    diagnostics.preparation_worker_limit = prepBurstLimit
+                    diagnostics.preparation_cohorts = (diagnostics.preparation_cohorts or 0) + 1
+                    nextCohortAt = os.clock() + #calls / 120
+                    prepBurstActive = true
+                    local dispatched = runPool(calls, function()
                         if not validHelper(helper) then return fail("The identified preparation block was removed or changed. Stopped.") end
                         return invoke(remote, helper, size, cf)
-                    end, math.min(speed.workers, groupSize)) then return false end
+                    end, #calls)
+                    prepBurstActive = false
+                    if not dispatched then return false end
+                    prepSample.after = Adapter.available(plan.block_type)
+                    prepSample.gain = prepSample.after - prepSample.baseline
+                    prepSample.net_gain = prepSample.after - before
+                    if not checkedProbe then
+                        diagnostics.phase = "preparing_probe_verify"
+                        local probeDeadline = os.clock() + 5
+                        repeat
+                            if stopped() then return false end
+                            if not validHelper(helper) then return fail("The identified preparation block was removed or changed. Stopped.") end
+                            if Adapter.available(plan.block_type) > before then break end
+                            preparationProgress(); task.wait(0.03)
+                        until os.clock() >= probeDeadline
+                        checkedProbe = true
+                        diagnostics.prep_probe_calls = diagnostics.prep_scale_requests
+                        diagnostics.prep_probe_available = Adapter.available(plan.block_type)
+                        diagnostics.prep_probe_net_gain = diagnostics.prep_probe_available - before
+                        noGainProbe = diagnostics.prep_probe_net_gain <= 0
+                        if noGainProbe then break end
+                        diagnostics.phase = "preparing_scale"
+                    end
+                    preparationProgress()
+                    if Adapter.available(plan.block_type) >= required then break end
                 end
                 -- Every scale in this round has replied. Observe actual stock
                 -- while this exact helper is still alive, as in the source.
                 diagnostics.phase = "preparing_verify"
-                local deadline = os.clock() + 5
+                local deadline = os.clock() + (noGainProbe and 0 or 5)
                 repeat
                     if stopped() then return false end
                     if not validHelper(helper) then return fail("The identified preparation block was removed or changed. Stopped.") end
                     if Adapter.available(plan.block_type) >= required then break end
+                    preparationProgress()
                     task.wait(0.03)
                 until os.clock() >= deadline
                 prepSample.after = Adapter.available(plan.block_type)
-                prepSample.gain = prepSample.after - roundBefore
+                prepSample.gain = prepSample.after - prepSample.baseline
+                prepSample.net_gain = prepSample.after - before
                 diagnostics.inventory_before_cleanup = prepSample.after
+                prepSample.finished = true
                 prepSample = nil
+                if noGainProbe or Adapter.available(plan.block_type) >= required then break end
                 groupSize = math.max(math.floor(groupSize / 2), 10)
             end
             pipelineActive, manualDrain = false, false
@@ -997,18 +1133,25 @@ function Adapter.build(plan, origin, options)
             if not removeHelper() then return fail("The game did not confirm removal of the temporary preparation block.") end
             existing[helper] = true
             diagnostics.phase = "preparing_verify"
-            report("Checking available material after shared-helper cleanup...")
+            preparationProgress()
             local deadline = os.clock() + 5
             repeat
                 if stopped() then return false end
                 if Adapter.available(plan.block_type) >= required then break end
+                preparationProgress()
                 task.wait(0.03)
             until os.clock() >= deadline
             local after = Adapter.available(plan.block_type)
             diagnostics.inventory_after, diagnostics.prep_gain = after, after - before
+            diagnostics.prep_inventory_after_cleanup = inventorySnapshot()
+            diagnostics.prep_net_gain = after - before
             if after < required then
                 local code = diagnostics.prep_scale_requests >= 4096 and "request_limit"
-                    or after <= before and "no_gain" or "round_limit"
+                    or noGainProbe and after <= before and "no_gain_probe"
+                    or noGainProbe and "post_cleanup_shortfall" or "round_limit"
+                if code == "no_gain_probe" then
+                    return preparationFailed(code, "showed no net material gain after its timing-check cohort and confirmed helper cleanup; this port has not reproduced the working method")
+                end
                 return preparationFailed(code, "finished its bounded shared-helper top-ups without sufficient verified material")
             end
             diagnostics.preparation_status, diagnostics.prep_stop_reason = "verified", "satisfied"
@@ -1236,7 +1379,7 @@ function Adapter.build(plan, origin, options)
                 job.result = result
                 if first then diagnostics.returned_type = typeof(result) end
                 return true
-            end, first and 1 or speed.workers) then return false end
+            end, first and 1 or speed.maxWorkers) then return false end
             -- Drain this cohort before matching nil-return observations or
             -- starting another cohort. Never infer a server ordinal mapping.
             for _, job in ipairs(cohort) do
@@ -1247,6 +1390,7 @@ function Adapter.build(plan, origin, options)
                 end
                 created += 1
             end
+            growLuauLimits()
         end
         diagnostics.phase = "painting"
         report("Painting the identified image blocks...")
@@ -1270,7 +1414,7 @@ function Adapter.build(plan, origin, options)
             diagnostics.resize_windows += 1
             if not runPool(resizeJobs, function(job)
                 return invoke(remote, job.model, job.size, job.cf)
-            end, first and 1 or speed.workers) then return false end
+            end, first and 1 or speed.maxWorkers) then return false end
             -- The source ignored its final resize wait. Here both geometry and
             -- color must be observed before any block is reported finished.
             for _, job in ipairs(resizeJobs) do
@@ -1282,6 +1426,7 @@ function Adapter.build(plan, origin, options)
                 completed += 1
             end
             report(string.format("Verified %d / %d blocks", completed, #items))
+            growLuauLimits()
         end
         pipelineActive, manualDrain = false, false
         return not stopped()
@@ -1509,10 +1654,19 @@ function Adapter.build(plan, origin, options)
     end)
     -- Failure/timeout can leave a phase before its normal exit. Cleanup must
     -- never wait on a manual-selection dispatch reservation from that phase.
-    pipelineActive, manualDrain = false, false
+    pipelineActive, manualDrain, prepBurstActive = false, false, false
     if connection then connection:Disconnect() end
     if not ok then failure = failure or tostring(message) end
     if preparing then
+        if speedMode == "Luau.pro" then
+            samplePreparation()
+            if prepSample then
+                prepSample.after = Adapter.available(plan.block_type)
+                prepSample.gain = prepSample.after - (prepSample.baseline or prepSample.before)
+                prepSample.net_gain = prepSample.after - diagnostics.inventory_before
+                prepSample.snapshot_before_cleanup = inventorySnapshot()
+            end
+        end
         if helperPossible then removeHelper() end
         restoreHeldTool()
     end
@@ -1537,11 +1691,19 @@ function Adapter.build(plan, origin, options)
                 or (flight.pending > 0 and "request_pending")
                 or (failure and "request_failed") or "cancelled_or_context_changed"
             if prepSample then
-                prepSample.after = diagnostics.inventory_after
-                prepSample.gain = prepSample.after - prepSample.before
+                if speedMode == "Luau.pro" then
+                    prepSample.incomplete = true
+                    -- Keep the pre-cleanup observation; the helper refund is
+                    -- separate and is never rewritten as a scale yield.
+                    prepSample.snapshot_after_cleanup = diagnostics.prep_inventory_after_cleanup
+                else
+                    prepSample.after = diagnostics.inventory_after
+                    prepSample.gain = prepSample.after - prepSample.before
+                end
             end
         end
     end
+    samplePreparation()
     diagnostics.temporary_block_remaining = helperPossible
     flight.busy = restoreAfterPending ~= nil
     local success = completed == #items

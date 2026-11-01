@@ -21,15 +21,17 @@ All filesystem paths are relative, such as `baft image builder/builder_a.lua`. S
 
 Run the same link again to obtain the latest published version. A saved `baft image builder/start.lua` contains the same online launcher. The loader stops visibly on a failed update; it does not silently run an old version. Only one builder operation should run at a time.
 
-## Luau.pro method in version 3.1.0
+## Luau.pro method in version 3.1.1
 
 The image-builder adapter now has a **Luau.pro** profile. It ports the recovered material-preparation lifecycle and staged image placement into this builder. It is an independent implementation of those methods; the original Luau.pro engine and its unresolved helper bindings are not bundled or invoked.
 
-- **Material preparation:** when stock is short and Infinite Blocks is enabled, reuse one newly identified helper for up to four top-up rounds, then remove it. Check actual inventory both before and after cleanup; image building starts only with sufficient verified material. At least one available block is needed to begin preparation.
+- **Material preparation:** when stock is short and Infinite Blocks is enabled, reuse one newly identified helper for up to four top-up rounds, then remove it. Launch each scaling group together, matching the recovered method's within-group timing. Measure the first group before scheduling the remaining work. Check actual inventory both before and after cleanup; image building starts only with sufficient verified material. At least one available block is needed to begin preparation.
 - **Image placement:** place in cohorts of up to 50, identify the new owned models, paint them in batches, then resize in windows of up to 150. Larger images use bounded work windows. Position, size, orientation and color must pass the existing final checks before a block counts as completed.
 - **Hands-free operation:** keep the normal game hotbar and manual tool selection, cancellation, tool restoration and protection against starting another build while earlier requests are still unresolved.
 
-The Luau.pro profile has finite limits: at most 64 requests in flight, a wall-building dispatch ceiling of 600 requests per second, and a lower preparation dispatch ceiling of 120 per second. These are limits on requests, not a promised completed-block rate. Actual throughput depends on server responses and verification. Rapid remains available with its adaptive workload. Selecting Compatible tool mode changes either of these background-only profiles to Fast.
+The Luau.pro wall profile now adapts to response latency: it starts at 120 requests per second and 16 workers, with ceilings of 600 requests per second and 64 pending requests. Preparation is separate: groups of up to 100 scaling calls are launched together, fully drained before the next group, and paced between groups at an average ceiling of 120 calls per second. These are request limits, not a promised completed-block rate. Rapid remains available. Selecting Compatible tool mode changes either background-only profile to Fast.
+
+During preparation, the display shows actual available material, completed checks and pending calls. Returning the helper's original block is not counted as new material. If the first group produces no net gain after cleanup and a replication wait, the builder stops with an explanation rather than sending the rest of a large estimated round. The local report records inventory before/after cleanup and observed helper geometry for diagnosis.
 
 This update applies only to the image builder. It does not modify the separate AI builder.
 

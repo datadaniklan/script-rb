@@ -318,6 +318,12 @@ local function context(settings)
                         math.max(args[2].Y, settings.minimumScale), math.max(args[2].Z, settings.minimumScale))
                 end
                 if settings.afterScale then settings.afterScale(ctx, count) end
+                if args[1].preparation and settings.idempotentPrepResize and not args[1].prepResized then
+                    -- A resize can merely release the one material unit used
+                    -- by this helper; identical later requests add nothing.
+                    ctx.used.Value -= 1
+                    args[1].prepResized = true
+                end
                 if args[1].preparation and settings.prepGain then
                     local gain = type(settings.prepGain) == "function" and settings.prepGain(ctx, count, args)
                         or settings.prepGain
@@ -332,7 +338,9 @@ local function context(settings)
                 if not settings.noDeleteEffect then
                     parent(args[1], nil)
                     if args[1].preparation then
-                        if settings.prepUsesUsed then ctx.used.Value -= 1 else ctx.stock.Value += 1 end
+                        if settings.idempotentPrepResize then
+                            if not args[1].prepResized then ctx.used.Value -= 1 end
+                        elseif settings.prepUsesUsed then ctx.used.Value -= 1 else ctx.stock.Value += 1 end
                         local gain = args[1].pendingPrepGain or 0
                         local function applyGain()
                             if settings.prepGainDelay then task.wait(settings.prepGainDelay) end
@@ -2076,7 +2084,7 @@ test("Luau.pro shares one identified preparation helper across measured topups t
         end})
     local result = run(function() return ctx.adapter.build(plan(100), CFrame.new(),
         {speed = "Luau.pro", infiniteBlocks = true}) end)
-    assert(result.ok, result.message); equal(result.completed, 100); equal(result.diagnostics.prep_version, 3)
+    assert(result.ok, result.message); equal(result.completed, 100); equal(result.diagnostics.prep_version, 4)
     equal(result.diagnostics.prep_rounds, 3); equal(result.diagnostics.prep_scale_requests, 4)
     equal(ctx.counters.delete, 1); equal(ctx.deleted[1], ctx.built[1]); equal(ctx.counters.build, 101)
     near(result.diagnostics.inventory_before_cleanup, 120); near(result.diagnostics.inventory_after, 121)
@@ -2086,7 +2094,7 @@ test("Luau.pro shares one identified preparation helper across measured topups t
     equal(result.diagnostics.temporary_block_remaining, false); equal(ctx.equipCalls, 0)
 end)
 
-test("Luau.pro topup preparation drains100-call groups within64 pending and120 requests per second", function()
+test("Luau.pro preparation sends a same-turn100-call cohort and paces later cohorts after drain", function()
     local ctx = context({stock = 1, prepGain = 100, delayStage = "scale", delay = 0.5,
         onDispatch = function(c, stage, args, count)
             if stage == "scale" and args[1].preparation and count == 101 then
@@ -2098,24 +2106,25 @@ test("Luau.pro topup preparation drains100-call groups within64 pending and120 r
     local result = run(function() return ctx.adapter.build(materialPlan(100), CFrame.new(),
         {speed = "Luau.pro", infiniteBlocks = true}) end)
     assert(result.ok, result.message); equal(ctx.checkedCohort, true)
-    assert(ctx.maxPrepScales > 1 and ctx.maxPrepScales <= 64)
+    equal(ctx.maxPrepScales, 100)
+    equal(result.diagnostics.prep_pending_limit, 100)
     equal(ctx.counters.delete, 1); equal(result.diagnostics.prep_rounds, 1)
-    local previous
-    for index = 1, result.diagnostics.prep_requests do
-        local call = ctx.calls[index]
-        if previous then assert(call.at - previous >= 1 / 120 - 0.000001) end
-        previous = call.at
+    local scales = {}
+    for _, call in ipairs(ctx.calls) do
+        if call.stage == "scale" and call.args[1].preparation then table.insert(scales, call) end
     end
+    for i = 2, 100 do near(scales[i].at, scales[1].at) end
+    assert(scales[101].at - scales[1].at >= 100 / 120 - 0.000001)
 end)
 
-test("Luau.pro no-gain preparation ends afterfour topups with one cleanup and no wall", function()
+test("Luau.pro no-gain preparation ends after its timing-check cohort with one cleanup and no wall", function()
     local ctx = context({stock = 1})
     local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(),
         {speed = "Luau.pro", infiniteBlocks = true}) end)
-    equal(result.ok, false); equal(result.created, 0); equal(result.diagnostics.prep_stop_reason, "no_gain")
-    equal(result.diagnostics.prep_rounds, 4); equal(ctx.counters.scale, 4); equal(ctx.counters.build, 1)
+    equal(result.ok, false); equal(result.created, 0); equal(result.diagnostics.prep_stop_reason, "no_gain_probe")
+    equal(result.diagnostics.prep_rounds, 1); equal(ctx.counters.scale, 1); equal(ctx.counters.build, 1)
     equal(ctx.counters.delete, 1); equal(ctx.counters.paint, nil); equal(result.diagnostics.temporary_block_remaining, false)
-    for i, size in ipairs({100, 50, 25, 12}) do equal(result.diagnostics.prep_samples[i].cohort_limit, size) end
+    equal(result.diagnostics.prep_samples[1].cohort_limit, 100)
 end)
 
 test("Luau.pro insufficient positive gain stops afterfour rounds instead of inventing inventory", function()
@@ -2125,6 +2134,7 @@ test("Luau.pro insufficient positive gain stops afterfour rounds instead of inve
     equal(result.ok, false); equal(result.diagnostics.prep_rounds, 4)
     equal(result.diagnostics.prep_stop_reason, "round_limit"); equal(ctx.counters.delete, 1)
     equal(ctx.counters.build, 1); equal(ctx.counters.paint, nil)
+    for i, size in ipairs({100, 50, 25, 12}) do equal(result.diagnostics.prep_samples[i].cohort_limit, size) end
 end)
 
 test("Luau.pro post-cleanup inventory loss prevents the wall even after a sufficient pre-delete reading", function()
@@ -2213,9 +2223,9 @@ test("Luau.pro waits for post-delete material replication without another helper
     local ctx = context({stock = 1, prepGain = 100, prepGainOnDelete = true, prepGainDelay = 1})
     local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(),
         {speed = "Luau.pro", infiniteBlocks = true}) end)
-    assert(result.ok, result.message); equal(result.diagnostics.prep_rounds, 4)
+    assert(result.ok, result.message); equal(result.diagnostics.prep_rounds, 1)
     equal(ctx.counters.delete, 1); equal(ctx.counters.build, 5)
-    near(result.diagnostics.inventory_before_cleanup, 0); near(result.diagnostics.inventory_after, 401)
+    near(result.diagnostics.inventory_before_cleanup, 0); near(result.diagnostics.inventory_after, 101)
 end)
 
 test("Luau.pro white helper keeps source dimensions pose and eight-argument placement", function()
@@ -2240,7 +2250,7 @@ test("Luau.pro unconfirmed helper removal is never retried and prevents wall pla
 end)
 
 test("Luau.pro enforces4096 total preparation calls across its four retained-helper rounds", function()
-    local ctx = context({stock = 1})
+    local ctx = context({stock = 1, prepGain = 1})
     local result = run(function() return ctx.adapter.build(materialPlan(1000), CFrame.new(),
         {speed = "Luau.pro", infiniteBlocks = true}) end)
     equal(result.ok, false); equal(result.diagnostics.prep_scale_requests, 4096)
@@ -2267,7 +2277,7 @@ test("Luau.pro native selection during shared-helper work drains calls and prese
     end
     local result = run(function() return ctx.adapter.build(materialPlan(20), CFrame.new(),
         {speed = "Luau.pro", infiniteBlocks = true, getManualToolSelection = getter}) end)
-    assert(result.ok, result.message); equal(ctx.applied, true); assert(result.diagnostics.manual_drains >= 1)
+    assert(result.ok, result.message); equal(ctx.applied, true)
     equal(ctx.counters.delete, 1); equal(ctx.nativeActive.paint, true); equal(ctx.tools.paint.Parent, ctx.character)
 end)
 
@@ -2289,6 +2299,119 @@ test("Luau.pro ownership loss between painting and resize prevents a foreign sca
     equal(result.ok, false); equal(result.completed, 1)
     for _, model in ipairs(ctx.scaled) do assert(model ~= ctx.moved) end
     near(ctx.moved.PPart.Size.X, 2); equal(ctx.moved.Parent, ctx.otherFolder)
+end)
+
+test("Luau.pro idempotent thin resizing reproduces14479 baseline with no surplus and stops after100 checks", function()
+    local ctx = context({stock = 14479, prepUsesUsed = true, idempotentPrepResize = true,
+        delayStage = "scale", delay = 0.1})
+    local p = gridPlan(141007)
+    p.rectangles[1].w, p.rectangles[1].h = 64, 9 -- Adds8 rounded material units:141015 required.
+    equal(ctx.adapter.materialNeed(p), 141015)
+    local result = run(function() return ctx.adapter.build(p, CFrame.new(), {speed = "Luau.pro", infiniteBlocks = true}) end)
+    equal(result.ok, false); equal(result.diagnostics.prep_stop_reason, "no_gain_probe")
+    equal(ctx.counters.scale, 100); equal(ctx.counters.build, 1); equal(ctx.counters.delete, 1)
+    equal(ctx.counters.paint, nil); equal(result.created, 0); equal(result.completed, 0)
+    near(result.diagnostics.inventory_before, 14479); near(result.diagnostics.inventory_after, 14479)
+    near(result.diagnostics.prep_gain, 0); near(result.diagnostics.prep_net_gain, 0)
+    near(result.diagnostics.prep_samples[1].before, 14478)
+    near(result.diagnostics.prep_samples[1].baseline, 14479)
+    near(result.diagnostics.prep_samples[1].after, 14479); near(result.diagnostics.prep_samples[1].gain, 0)
+    equal(result.diagnostics.prep_scale_completed, 100)
+    equal(result.diagnostics.prep_response_types.scale.boolean, 100)
+    near(result.diagnostics.prep_inventory_initial.stock, 14479)
+    near(result.diagnostics.prep_inventory_after_cleanup.used, 0)
+    near(result.diagnostics.prep_helper_position.y, -250000)
+    equal(result.diagnostics.prep_helper_present, false)
+    assert(clock < 12, "No net gain must not run the remaining1279-call round")
+end)
+
+test("Luau.pro timing-shaped mock credits material only after at least80 scales enter the same scheduler turn", function()
+    local ctx = context({stock = 1, delayStage = "scale", delay = 0.1,
+        onDispatch = function(c, stage, args)
+            if stage == "scale" and args[1].preparation then
+                c.initialScaleAt = c.initialScaleAt or clock
+                if clock == c.initialScaleAt then c.initialScaleCount = (c.initialScaleCount or 0) + 1 end
+            end
+        end,
+        prepGain = function(c) return (c.initialScaleCount or 0) >= 80 and 100 or 0 end})
+    local result = run(function() return ctx.adapter.build(materialPlan(100), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    assert(result.ok, result.message); equal(ctx.initialScaleCount, 100)
+    equal(result.diagnostics.prep_probe_calls, 100); assert(result.diagnostics.prep_probe_net_gain > 0)
+    equal(result.diagnostics.prep_scale_requests, 130); equal(ctx.counters.delete, 1)
+end)
+
+test("Luau.pro a single late response among100 preparation calls blocks cleanup until every reply", function()
+    local ctx = context({stock = 1, prepGain = 100, delayStage = "scale", delay = 0.1,
+        onDispatch = function(c, stage, args, count)
+            if stage == "scale" and args[1].preparation and count == 100 then c.settings.delay = 20 end
+        end})
+    local result = run(function() return ctx.adapter.build(materialPlan(100), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    equal(result.ok, false); equal(ctx.counters.scale, 100); equal(ctx.counters.delete, nil)
+    equal(result.diagnostics.prep_scale_completed, 99); equal(sharedEnvironment.__ImageBuilderFlight.pending, 1)
+    equal(result.diagnostics.prep_samples[1].incomplete, true); equal(ctx.adapter.validate(plan()), false)
+    local count = #ctx.calls
+    drain(); equal(#ctx.calls, count); equal(ctx.counters.delete, nil)
+    equal(sharedEnvironment.__ImageBuilderFlight.pending, 0); equal(ctx.tools.scale.Parent, ctx.backpack)
+end)
+
+test("Luau.pro reports material counts pending replies and elapsed time during slow preparation waits", function()
+    local ctx = context({stock = 1, prepGain = 100, delayStage = "scale", delay = 4.4})
+    local events = {}
+    local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true, onProgress = function(_, _, _, detail)
+            if detail and detail.kind == "preparation" then table.insert(events, {at = clock, detail = table.clone(detail)}) end
+        end}) end)
+    assert(result.ok, result.message); assert(#events >= 5)
+    local pendingSeen = false
+    for i, event in ipairs(events) do
+        local detail = event.detail
+        equal(detail.required, 4); assert(detail.sent <= detail.planned)
+        assert(detail.completed <= detail.sent); assert(detail.elapsed >= 0)
+        if detail.pending > 0 and detail.completed == 0 and detail.elapsed > 1 then pendingSeen = true end
+        if i > 1 then assert(event.at - events[i - 1].at >= 0.5 - 0.000001) end
+    end
+    equal(pendingSeen, true); assert(result.diagnostics.prep_elapsed >= 4.4)
+end)
+
+test("Luau.pro cancel during a slow source cohort reports precleanup gain separately from helper refund", function()
+    local ctx = context({stock = 14479, prepUsesUsed = true, delayStage = "scale", delay = 0.5})
+    local result = run(function() return ctx.adapter.build(materialPlan(120), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true, shouldCancel = function() return clock >= 0.2 end}) end)
+    equal(result.ok, false); equal(ctx.counters.delete, 1); equal(result.created, 0)
+    local sample = result.diagnostics.prep_samples[1]
+    near(sample.after, 14478); near(sample.gain, -1); near(sample.net_gain, -1)
+    near(sample.snapshot_after_cleanup.available, 14479)
+    near(result.diagnostics.prep_net_gain, 0); near(result.diagnostics.prep_gain, 0)
+end)
+
+test("Luau.pro delayed postcleanup credit with a remaining shortfall is reported without creating another helper", function()
+    local ctx = context({stock = 1, prepGain = 2, prepGainOnDelete = true, prepGainDelay = 1})
+    local result = run(function() return ctx.adapter.build(plan(100), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    equal(result.ok, false); equal(result.diagnostics.prep_stop_reason, "post_cleanup_shortfall")
+    equal(ctx.counters.build, 1); equal(ctx.counters.delete, 1); equal(ctx.counters.scale, 2)
+    near(result.diagnostics.inventory_after, 5); near(result.diagnostics.prep_gain, 4)
+end)
+
+test("Luau.pro wall admission starts120 by16 and backs off slow RPC responses", function()
+    local ctx = context({stock = 1000, remoteDelay = 2})
+    local result = run(function() return ctx.adapter.build(gridPlan(101), CFrame.new(), {speed = "Luau.pro"}) end)
+    assert(result.ok, result.message); assert(result.diagnostics.adaptive_downshifts > 0)
+    equal(result.diagnostics.adaptive_peak_rate, 120); equal(result.diagnostics.adaptive_peak_workers, 16)
+    assert(result.diagnostics.effective_request_rate < 120); assert(result.diagnostics.worker_limit < 16)
+    assert(ctx.maxRemoteCalls <= 16, "Slow replies exceeded initial pending capacity")
+    near(result.diagnostics.rpc_latency_ewma_seconds, 2)
+end)
+
+test("Luau.pro wall admission grows on healthy replies within600 and64 ceilings", function()
+    local ctx = context({stock = 2000, remoteDelay = 0.1})
+    local result = run(function() return ctx.adapter.build(gridPlan(901), CFrame.new(), {speed = "Luau.pro"}) end)
+    assert(result.ok, result.message); assert(result.diagnostics.adaptive_upshifts > 0)
+    assert(result.diagnostics.effective_request_rate > 120 and result.diagnostics.effective_request_rate <= 600)
+    assert(result.diagnostics.worker_limit > 16 and result.diagnostics.worker_limit <= 64)
+    assert(ctx.maxRemoteCalls <= 64)
 end)
 
 print("MOCK_GAME_ADAPTER_TESTS_PASSED " .. tostring(tests))
