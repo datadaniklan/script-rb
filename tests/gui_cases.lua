@@ -407,6 +407,7 @@ test("preparation reports preserve measured gains and bound per-round diagnostic
         rpc_latency_total_seconds = 800, rpc_latency_max_seconds = 0.75, rpc_latency_mean_seconds = 0.4,
         worker_limit = 384, batch_limit = 1024, peak_geometry_jobs = 1024,
         max_request_rate = 600, max_pending_limit = 64, adaptive_upshifts = 3, adaptive_downshifts = 2,
+        adaptive_non_sustained_slow_replies = 4, adaptive_sustained_backoffs = 1, adaptive_severe_backoffs = 1,
         adaptive_peak_rate = 240, adaptive_peak_workers = 24, rpc_latency_ewma_seconds = 0.8,
         monitor_delay_ewma_seconds = 0.045, monitor_delay_max_seconds = 0.35,
         replication_peak_waiting = 40, replication_pause_count = 2, verification_budget_seconds = 16,
@@ -428,6 +429,7 @@ test("preparation reports preserve measured gains and bound per-round diagnostic
     assert(diag.worker_limit == 384 and diag.batch_limit == 1024 and diag.peak_geometry_jobs == 1024)
     assert(diag.max_request_rate == 600 and diag.max_pending_limit == 64)
     assert(diag.adaptive_upshifts == 3 and diag.adaptive_downshifts == 2)
+    assert(diag.adaptive_non_sustained_slow_replies == 4 and diag.adaptive_sustained_backoffs == 1 and diag.adaptive_severe_backoffs == 1)
     assert(diag.adaptive_peak_rate == 240 and diag.adaptive_peak_workers == 24)
     assert(diag.rpc_latency_ewma_seconds == 0.8 and diag.monitor_delay_ewma_seconds == 0.045)
     assert(diag.monitor_delay_max_seconds == 0.35 and diag.replication_peak_waiting == 40)

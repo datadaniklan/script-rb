@@ -21,7 +21,7 @@ All filesystem paths are relative, such as `baft image builder/builder_a.lua`. S
 
 Run the same link again to obtain the latest published version. A saved `baft image builder/start.lua` contains the same online launcher. The loader stops visibly on a failed update; it does not silently run an old version. Only one builder operation should run at a time.
 
-## Luau.pro method in version 3.1.2
+## Luau.pro method in version 3.1.3
 
 The image-builder adapter now has a **Luau.pro** profile. It ports the recovered material-preparation lifecycle and staged image placement into this builder. It is an independent implementation of those methods; the original Luau.pro engine and its unresolved helper bindings are not bundled or invoked.
 
@@ -30,6 +30,8 @@ The image-builder adapter now has a **Luau.pro** profile. It ports the recovered
 - **Hands-free operation:** keep the normal game hotbar and manual tool selection, cancellation, tool restoration and protection against starting another build while earlier requests are still unresolved.
 
 The Luau.pro wall profile now adapts to response latency: it starts at 120 requests per second and 16 workers, with ceilings of 600 requests per second and 64 pending requests. Preparation is separate: groups of up to 100 scaling calls are launched together, fully drained before the next group, and paced between groups at an average ceiling of 120 calls per second. These are request limits, not a promised completed-block rate. Rapid remains available. Selecting Compatible tool mode changes either background-only profile to Fast.
+
+In 3.1.3, normal Luau.pro wall admission uses recent response history before reducing concurrency: at least three replies and a majority of the latest 16 replies must be slow. An isolated modest delay no longer halves the worker count. A reply taking four seconds or more still triggers a reduction, and sustained congestion, timeouts and cancellation retain their existing protections. Reductions are spaced by at least two seconds; growth still requires healthy replies and stays within the same ceilings. Rapid and material preparation retain their previous behavior.
 
 During preparation, the display shows actual available material, completed checks and pending calls. Returning the helper's original block is not counted as new material. If the first group produces no net gain after cleanup and a replication wait, the builder stops with an explanation rather than sending the rest of a large estimated round. The local report records inventory before/after cleanup and observed helper geometry for diagnosis.
 

@@ -2526,4 +2526,92 @@ test("Luau.pro cancellation during parallel paint drains sent chunks without res
     drain(); equal(#ctx.calls, count); equal(ctx.tools.paint.Parent, ctx.backpack)
 end)
 
+
+test("Luau.pro isolated slow wall replies do not collapse healthy admission", function()
+    local ctx = context({stock = 2000, returnNil = true, remoteDelay = function(c)
+        return #c.dispatches % 53 == 0 and 1.65 or 0.18
+    end})
+    local result = run(function() return ctx.adapter.build(gridPlan(601), CFrame.new(), {speed = "Luau.pro"}) end)
+    assert(result.ok, result.message); equal(result.completed, 601)
+    equal(result.diagnostics.adaptive_downshifts, 0)
+    assert(result.diagnostics.adaptive_non_sustained_slow_replies > 0)
+    equal(result.diagnostics.adaptive_severe_backoffs, 0)
+    assert(ctx.maxRemoteCalls <= 64)
+end)
+
+test("Luau.pro correlated slow reply tail still reduces capacity", function()
+    local ctx = context({stock = 2000, remoteDelay = function(c)
+        local number = #c.dispatches
+        return number >= 101 and number <= 124 and 1.1 or 0.18
+    end})
+    local result = run(function() return ctx.adapter.build(gridPlan(601), CFrame.new(), {speed = "Luau.pro"}) end)
+    assert(result.ok, result.message); equal(result.completed, 601)
+    assert(result.diagnostics.adaptive_sustained_backoffs > 0)
+    equal(result.diagnostics.adaptive_severe_backoffs, 0)
+    assert(result.diagnostics.adaptive_upshifts > 0)
+    assert(result.diagnostics.worker_limit >= 4 and result.diagnostics.worker_limit <= 64)
+end)
+
+test("Luau.pro load dependent latency backs off rather than exceeding pending limits", function()
+    local ctx = context({stock = 2000, remoteDelay = function(c)
+        return c.activeRemoteCalls >= 20 and 0.9 or 0.18
+    end})
+    local result = run(function() return ctx.adapter.build(gridPlan(1201), CFrame.new(), {speed = "Luau.pro"}) end)
+    assert(result.ok, result.message); equal(result.completed, 1201)
+    assert(result.diagnostics.adaptive_upshifts > 0)
+    assert(result.diagnostics.adaptive_sustained_backoffs > 0)
+    assert(ctx.maxRemoteCalls <= 64)
+    assert(result.diagnostics.effective_request_rate >= 20 and result.diagnostics.effective_request_rate <= 600)
+    equal(result.diagnostics.adaptive_severe_backoffs, 0)
+end)
+
+test("Luau.pro one severe four second reply reduces capacity immediately", function()
+    local ctx = context({stock = 1000, remoteDelay = function(c)
+        return #c.dispatches == 5 and 4.1 or 0.18
+    end})
+    local result = run(function() return ctx.adapter.build(gridPlan(101), CFrame.new(), {speed = "Luau.pro"}) end)
+    assert(result.ok, result.message); equal(result.completed, 101)
+    equal(result.diagnostics.adaptive_severe_backoffs, 1)
+    equal(result.diagnostics.adaptive_sustained_backoffs, 0)
+    equal(result.diagnostics.adaptive_downshifts, 1)
+end)
+
+test("Luau.pro recovers after sustained slow replies clear while respecting the cooldown", function()
+    local changes, previousRate = {}, nil
+    local ctx = context({stock = 2000, remoteDelay = function(c)
+        return #c.dispatches <= 60 and 0.8 or 0.18
+    end})
+    local result = run(function() return ctx.adapter.build(gridPlan(901), CFrame.new(), {speed = "Luau.pro",
+        onProgress = function(_, _, _, detail)
+            if detail and detail.kind == "wall" and detail.requestRate ~= previousRate then
+                table.insert(changes, {at = clock, rate = detail.requestRate})
+                previousRate = detail.requestRate
+            end
+        end}) end)
+    assert(result.ok, result.message); equal(result.completed, 901)
+    assert(result.diagnostics.adaptive_sustained_backoffs > 0)
+    assert(result.diagnostics.adaptive_upshifts > 0)
+    assert(result.diagnostics.effective_request_rate > 120)
+    local lastDecrease = -math.huge
+    for index = 2, #changes do
+        if changes[index].rate < changes[index - 1].rate then
+            assert(changes[index].at - lastDecrease >= 2 - 0.000001)
+            lastDecrease = changes[index].at
+        end
+    end
+    assert(result.diagnostics.worker_limit <= 64)
+end)
+
+test("Rapid retains its existing single slow reply backoff", function()
+    local ctx = context({stock = 1000, remoteDelay = function(c)
+        return #c.dispatches == 5 and 1.65 or 0.18
+    end})
+    local result = run(function() return ctx.adapter.build(gridPlan(101), CFrame.new(), {speed = "Rapid"}) end)
+    assert(result.ok, result.message); equal(result.completed, 101)
+    assert(result.diagnostics.adaptive_downshifts > 0)
+    equal(result.diagnostics.adaptive_non_sustained_slow_replies, 0)
+    equal(result.diagnostics.adaptive_sustained_backoffs, 0)
+    equal(result.diagnostics.adaptive_severe_backoffs, 0)
+end)
+
 print("MOCK_GAME_ADAPTER_TESTS_PASSED " .. tostring(tests))

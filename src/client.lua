@@ -66,7 +66,7 @@ local qualityPresets = {
 }
 local previewFiles, activePreviewPath = Backend.previewFiles(), nil
 local chosenCount = 0
-local api = {Version = "3.1.2"}
+local api = {Version = "3.1.3"}
 ENV.ImageBuilder = api
 
 local C = {
@@ -866,6 +866,9 @@ local function sendTelemetry(buildPlan, ok, result, buildToolMode, buildInfinite
             max_pending_limit = tonumber(diag.max_pending_limit),
             adaptive_upshifts = tonumber(diag.adaptive_upshifts),
             adaptive_downshifts = tonumber(diag.adaptive_downshifts),
+            adaptive_non_sustained_slow_replies = tonumber(diag.adaptive_non_sustained_slow_replies),
+            adaptive_sustained_backoffs = tonumber(diag.adaptive_sustained_backoffs),
+            adaptive_severe_backoffs = tonumber(diag.adaptive_severe_backoffs),
             adaptive_peak_rate = tonumber(diag.adaptive_peak_rate),
             adaptive_peak_workers = tonumber(diag.adaptive_peak_workers),
             rpc_latency_ewma_seconds = tonumber(diag.rpc_latency_ewma_seconds),

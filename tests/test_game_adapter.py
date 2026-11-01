@@ -37,7 +37,7 @@ class GameAdapterMockTests(unittest.TestCase):
                 raise RuntimeError("Refusing cleanup outside the generated fixture path")
             temporary.unlink(missing_ok=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("MOCK_GAME_ADAPTER_TESTS_PASSED 162", result.stdout)
+        self.assertIn("MOCK_GAME_ADAPTER_TESTS_PASSED 168", result.stdout)
         print(result.stdout.strip())
 
 

@@ -218,6 +218,7 @@ function Adapter.build(plan, origin, options)
         rpc_completed = 0, rpc_latency_total_seconds = 0, rpc_latency_max_seconds = 0,
         max_request_rate = speed.maxRate or speed.rate, max_pending_limit = speed.maxWorkers or speed.workers,
         adaptive_upshifts = 0, adaptive_downshifts = 0, adaptive_peak_rate = speed.rate,
+        adaptive_non_sustained_slow_replies = 0, adaptive_sustained_backoffs = 0, adaptive_severe_backoffs = 0,
         adaptive_peak_workers = speed.workers, rpc_latency_ewma_seconds = 0,
         monitor_delay_ewma_seconds = 0, monitor_delay_max_seconds = 0,
         replication_peak_waiting = 0, replication_pause_count = 0, verification_budget_seconds = 0,
@@ -234,7 +235,8 @@ function Adapter.build(plan, origin, options)
         prep_rounds = 0, prep_scale_requests = 0, prep_gain = 0, prep_samples = {}}
     local adaptive = {rate = speed.rate, workers = speed.workers, latency = nil, recentMax = 0,
         healthyCalls = 0, nextIncrease = os.clock() + 3, lastDecrease = -math.huge,
-        pausePlacements = false, overshoot = 0}
+        pausePlacements = false, overshoot = 0, latencyWindow = {}, latencyIndex = 1,
+        latencySamples = 0, slowReplies = 0}
     flight.busy = true
 
     local function contextChanged()
@@ -273,27 +275,51 @@ function Adapter.build(plan, origin, options)
         diagnostics.adaptive_peak_rate = math.max(diagnostics.adaptive_peak_rate, rate)
         diagnostics.adaptive_peak_workers = math.max(diagnostics.adaptive_peak_workers, workers)
     end
-    local function slowDown()
+    local function slowDown(reason)
         if speedMode ~= "Rapid" and speedMode ~= "Luau.pro" then return end
         local now = os.clock()
         adaptive.nextIncrease = now + 5
         adaptive.healthyCalls = 0
-        if now - adaptive.lastDecrease < 0.5 then return end
+        if now - adaptive.lastDecrease < (speedMode == "Luau.pro" and 2 or 0.5) then return end
         adaptive.lastDecrease = now
         local rate = math.max(20, math.floor(adaptive.rate * 0.6))
         local workers = math.max(4, math.floor(adaptive.workers / 2))
         if rate ~= adaptive.rate or workers ~= adaptive.workers then
             setAdaptiveLimits(rate, workers)
             diagnostics.adaptive_downshifts += 1
+            if reason == "sustained" then diagnostics.adaptive_sustained_backoffs += 1
+            elseif reason == "severe" then diagnostics.adaptive_severe_backoffs += 1 end
         end
+    end
+    local function sustainedLuauLatency()
+        return adaptive.latencySamples >= 3 and adaptive.slowReplies * 2 > adaptive.latencySamples
     end
     local function observeLatency(elapsed)
         if speedMode ~= "Rapid" and speedMode ~= "Luau.pro" or preparing then return end
         adaptive.latency = adaptive.latency and adaptive.latency * 0.8 + elapsed * 0.2 or elapsed
         adaptive.recentMax = math.max(elapsed, adaptive.recentMax * 0.98)
         diagnostics.rpc_latency_ewma_seconds = adaptive.latency
-        if elapsed > 1 or adaptive.latency > 0.65 then slowDown()
-        elseif elapsed < 0.45 then adaptive.healthyCalls += 1 end
+        if speedMode == "Rapid" then
+            if elapsed > 1 or adaptive.latency > 0.65 then slowDown()
+            elseif elapsed < 0.45 then adaptive.healthyCalls += 1 end
+            return
+        end
+        -- Count the last 16 completed wall replies, not outstanding calls. A
+        -- short tail spike must not repeatedly halve otherwise healthy capacity.
+        local slow = elapsed >= 0.65
+        local previous = adaptive.latencyWindow[adaptive.latencyIndex]
+        if previous == true then adaptive.slowReplies -= 1 end
+        adaptive.latencyWindow[adaptive.latencyIndex] = slow
+        adaptive.latencyIndex = adaptive.latencyIndex % 16 + 1
+        adaptive.latencySamples = math.min(16, adaptive.latencySamples + 1)
+        if slow then adaptive.slowReplies += 1 end
+        if elapsed >= 4 then slowDown("severe")
+        elseif sustainedLuauLatency() then slowDown("sustained")
+        elseif elapsed < 0.45 then adaptive.healthyCalls += 1
+        else
+            adaptive.healthyCalls = 0
+            if slow then diagnostics.adaptive_non_sustained_slow_replies += 1 end
+        end
     end
     local function verificationBudget()
         if speedMode ~= "Rapid" and speedMode ~= "Luau.pro" then return 4 end
@@ -303,7 +329,7 @@ function Adapter.build(plan, origin, options)
     end
     local function growLuauLimits()
         if speedMode ~= "Luau.pro" or preparing or not adaptive.latency or adaptive.latency >= 0.45
-            or adaptive.healthyCalls < 16 or os.clock() < adaptive.nextIncrease then return end
+            or adaptive.healthyCalls < 16 or sustainedLuauLatency() or os.clock() < adaptive.nextIncrease then return end
         local rate, workers = math.min(speed.maxRate, adaptive.rate + 40), math.min(speed.maxWorkers, adaptive.workers + 4)
         if rate ~= adaptive.rate or workers ~= adaptive.workers then
             setAdaptiveLimits(rate, workers)
