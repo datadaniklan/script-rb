@@ -67,7 +67,7 @@ class RuntimeTests(unittest.TestCase):
             fixture = fixture.replace("--[[" + name + "]]", section(*pair))
         for name in ("INITIAL_OPTION", "SPEED_INITIAL"):
             fixture = fixture.replace("--[[" + name + "]]", initial)
-        self.execute("integration_shell.lua", "--[[INTEGRATION]]", fixture, "GUI_OPTION_TESTS_PASSED 30")
+        self.execute("integration_shell.lua", "--[[INTEGRATION]]", fixture, "GUI_OPTION_TESTS_PASSED 31")
 
 
 if __name__ == "__main__":

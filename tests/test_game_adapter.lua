@@ -1942,4 +1942,353 @@ test("Cancelling slow first-proof replication reports cancellation rather than a
     equal(sharedEnvironment.__ImageBuilderFlight.pending, 0)
 end)
 
+test("Luau.pro preserves place paint resize order with drained50 cohorts and150 resize windows", function()
+    local ctx = context({stock = 1000, remoteDelay = 0.1, returnNil = true})
+    local result = run(function() return ctx.adapter.build(gridPlan(452), CFrame.new(), {speed = "Luau.pro"}) end)
+    assert(result.ok, result.message); equal(result.completed, 452); equal(result.created, 452)
+    local nextCall = 1
+    for _, segment in ipairs({{"build", 1}, {"paint", 1}, {"scale", 1},
+        {"build", 300}, {"paint", 10}, {"scale", 300}, {"build", 151}, {"paint", 5}, {"scale", 151}}) do
+        for _ = 1, segment[2] do equal(ctx.calls[nextCall].stage, segment[1]); nextCall += 1 end
+    end
+    equal(nextCall - 1, #ctx.calls)
+    equal(result.diagnostics.speed_mode, "Luau.pro"); equal(result.diagnostics.pipeline_version, 3)
+    equal(result.diagnostics.placement_cohorts, 11); equal(result.diagnostics.resize_windows, 5)
+    equal(result.diagnostics.pipeline_windows, 2); equal(result.diagnostics.peak_geometry_jobs, 300)
+    assert(ctx.maxRemoteCalls <= 64 and ctx.maxRemoteCalls > 1)
+    equal(ctx.maxPaintCalls, 1); equal(sharedEnvironment.__ImageBuilderFlight.pending, 0)
+    local painted, scaled = {}, {}
+    for _, model in ipairs(ctx.painted) do assert(not painted[model]); painted[model] = true end
+    for _, model in ipairs(ctx.scaled) do assert(not scaled[model]); scaled[model] = true end
+    for i, call in ipairs(ctx.calls) do
+        if i > 1 then assert(call.at - ctx.calls[i - 1].at >= 1 / 600 - 0.000001) end
+        if call.stage == "paint" then assert(#call.args[1] <= 32) end
+    end
+end)
+
+test("Compatible Luau.pro uses the existing Fast fallback", function()
+    local ctx = context({stock = 100, allowEquip = true, requireHeld = true, remoteDelay = 0.1})
+    local result = run(function() return ctx.adapter.build(plan(35), CFrame.new(),
+        {speed = "Luau.pro", toolMode = "compatible"}) end)
+    assert(result.ok, result.message); equal(result.diagnostics.selected_speed_mode, "Luau.pro")
+    equal(result.diagnostics.speed_mode, "Fast"); equal(result.diagnostics.prep_version, 2)
+    equal(result.diagnostics.effective_request_rate, 60); assert(ctx.maxRemoteCalls <= 4)
+    equal(ctx.calls[2].stage, "scale"); equal(ctx.calls[3].stage, "paint")
+end)
+
+test("Luau.pro rejects ambiguous nil-return placement before painting its entire window", function()
+    local ctx = context({stock = 1000, returnNil = true, afterBuild = function(c, count)
+        if count == 51 then c.ambiguous = c.built[count]; c.manual = c:addBlock(c.ambiguous.PPart.CFrame) end
+    end})
+    local result = run(function() return ctx.adapter.build(gridPlan(130), CFrame.new(), {speed = "Luau.pro"}) end)
+    equal(result.ok, false); equal(result.completed, 1); equal(ctx.counters.build, 51)
+    equal(#ctx.painted, 1); equal(#ctx.scaled, 1); has(result.message, "Multiple new blocks")
+    near(ctx.manual.PPart.Size.X, 2); near(ctx.ambiguous.PPart.Size.X, 2)
+end)
+
+test("Luau.pro ignores preexisting returned blocks and preserves unrelated manual blocks", function()
+    local ctx = context({stock = 1000, returnOld = true, afterBuild = function(c, count)
+        if count == 2 then c.manual = c:addBlock(CFrame.new(50, 3, 50)) end
+    end})
+    ctx.preexisting = ctx:addBlock(CFrame.new())
+    local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(), {speed = "Luau.pro"}) end)
+    assert(result.ok, result.message); equal(result.completed, 4)
+    near(ctx.preexisting.PPart.Size.X, 2); near(ctx.manual.PPart.Size.X, 2)
+    for _, model in ipairs(ctx.scaled) do assert(model ~= ctx.preexisting and model ~= ctx.manual) end
+    for _, model in ipairs(ctx.painted) do assert(model ~= ctx.preexisting and model ~= ctx.manual) end
+end)
+
+test("Luau.pro never paints or resizes a returned block moved to another player's folder", function()
+    local ctx = context({stock = 1000, afterBuild = function(c, count)
+        if count == 2 then parent(c.built[count], c.otherFolder) end
+    end})
+    ctx.otherFolder = parent(instance("Folder", "OtherPlayer"), ctx.folder.Parent)
+    local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(), {speed = "Luau.pro"}) end)
+    equal(result.ok, false); equal(result.completed, 1); has(result.message, "outside your plot")
+    equal(#ctx.painted, 1); equal(#ctx.scaled, 1)
+end)
+
+test("Luau.pro verifies delayed placement color and final geometry without duplicating requests", function()
+    local ctx = context({stock = 1000, remoteDelay = 0.1, replicationDelay = 6})
+    local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(), {speed = "Luau.pro"}) end)
+    assert(result.ok, result.message); equal(result.completed, 4)
+    equal(ctx.counters.build, 4); equal(ctx.counters.scale, 4); equal(ctx.counters.paint, 2)
+end)
+
+test("Luau.pro fails first proof on unconfirmed color or geometry instead of claiming success", function()
+    for _, settings in ipairs({{noPaint = true}, {noScale = true}}) do
+        local ctx = context(settings)
+        local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(), {speed = "Luau.pro"}) end)
+        equal(result.ok, false); equal(result.completed, 0); equal(ctx.counters.build, 1)
+        equal(ctx.counters.paint, 1); equal(ctx.counters.scale, 1)
+        equal(result.diagnostics.verification_failure_phase, "final")
+        equal(sharedEnvironment.__ImageBuilderFlight.pending, 0)
+    end
+end)
+
+test("Luau.pro cancellation drains placement calls without painting or sizing a partial window", function()
+    local ctx = context({stock = 1000, remoteDelay = 0.1, afterBuild = function(c, count)
+        if count == 2 then c.cancel = true end
+    end})
+    local result = run(function() return ctx.adapter.build(gridPlan(200), CFrame.new(), {speed = "Luau.pro",
+        shouldCancel = function() return ctx.cancel == true end}) end)
+    equal(result.ok, false); equal(result.completed, 1); equal(ctx.counters.scale, 1); equal(ctx.counters.paint, 1)
+    assert(ctx.counters.build <= 51); equal(sharedEnvironment.__ImageBuilderFlight.pending, 0)
+    for stage, tool in pairs(ctx.tools) do equal(tool.Parent, ctx.backpack); equal(ctx.scripts[stage].Disabled, false) end
+end)
+
+test("Luau.pro uncertain resize keeps the shared lock and tool reservations until all replies", function()
+    local ctx = context({stock = 1000, remoteDelay = 0.1, afterPaint = function(c, count)
+        if count == 2 then c.settings.delayStage, c.settings.delay = "scale", 20 end
+    end})
+    local result = run(function() return ctx.adapter.build(gridPlan(100), CFrame.new(), {speed = "Luau.pro"}) end)
+    equal(result.ok, false); equal(result.completed, 1); has(result.message, "without retrying")
+    assert(sharedEnvironment.__ImageBuilderFlight.pending > 0); equal(ctx.adapter.validate(plan()), false)
+    equal(result.diagnostics.tool_restore_pending, true); assert(ctx.maxRemoteCalls <= 64)
+    local calls = #ctx.calls
+    drain(); equal(#ctx.calls, calls); equal(sharedEnvironment.__ImageBuilderFlight.pending, 0)
+    equal(sharedEnvironment.__ImageBuilderFlight.busy, false); assert(ctx.adapter.validate(plan()))
+    equal(ctx.tools.scale.Parent, ctx.backpack)
+end)
+
+test("Luau.pro manual native selection drains current requests and resumes the same window", function()
+    local ctx = context({stock = 1000, remoteDelay = 0.4, frameStep = 1 / 60})
+    local getter = nativeControllers(ctx)
+    ctx.settings.afterBuild = function(c, count)
+        if count == 2 then c.selection = {revision = 1, tool = c.tools.paint, available = true} end
+    end
+    ctx.onNativeEquip = function(stage)
+        if stage == "paint" then equal(sharedEnvironment.__ImageBuilderFlight.pending, 0); ctx.applied = true end
+    end
+    local result = run(function() return ctx.adapter.build(gridPlan(151), CFrame.new(),
+        {speed = "Luau.pro", getManualToolSelection = getter}) end)
+    assert(result.ok, result.message); equal(ctx.applied, true); assert(result.diagnostics.manual_drains >= 1)
+    equal(ctx.nativeActive.paint, true); equal(ctx.tools.paint.Parent, ctx.character)
+end)
+
+test("Luau.pro shares one identified preparation helper across measured topups then deletes once", function()
+    local ctx = context({stock = 1, prepGain = 30, requireHeld = true, remoteDelay = 0.1,
+        afterScale = function(c)
+            if c.scaled[#c.scaled].preparation then
+                equal(c.scaled[#c.scaled], c.built[1]); equal(c.built[1].Parent, c.folder)
+                equal(c.counters.delete, nil)
+            end
+        end})
+    local result = run(function() return ctx.adapter.build(plan(100), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    assert(result.ok, result.message); equal(result.completed, 100); equal(result.diagnostics.prep_version, 3)
+    equal(result.diagnostics.prep_rounds, 3); equal(result.diagnostics.prep_scale_requests, 4)
+    equal(ctx.counters.delete, 1); equal(ctx.deleted[1], ctx.built[1]); equal(ctx.counters.build, 101)
+    near(result.diagnostics.inventory_before_cleanup, 120); near(result.diagnostics.inventory_after, 121)
+    equal(result.diagnostics.prep_samples[1].cohort_limit, 100)
+    equal(result.diagnostics.prep_samples[2].cohort_limit, 50)
+    equal(result.diagnostics.prep_samples[3].cohort_limit, 25)
+    equal(result.diagnostics.temporary_block_remaining, false); equal(ctx.equipCalls, 0)
+end)
+
+test("Luau.pro topup preparation drains100-call groups within64 pending and120 requests per second", function()
+    local ctx = context({stock = 1, prepGain = 100, delayStage = "scale", delay = 0.5,
+        onDispatch = function(c, stage, args, count)
+            if stage == "scale" and args[1].preparation and count == 101 then
+                equal(c.activePrepScales, 1) -- The first100 have all returned.
+                c.checkedCohort = true
+            end
+            if stage == "delete" then equal(c.activePrepScales, 0) end
+        end})
+    local result = run(function() return ctx.adapter.build(materialPlan(100), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    assert(result.ok, result.message); equal(ctx.checkedCohort, true)
+    assert(ctx.maxPrepScales > 1 and ctx.maxPrepScales <= 64)
+    equal(ctx.counters.delete, 1); equal(result.diagnostics.prep_rounds, 1)
+    local previous
+    for index = 1, result.diagnostics.prep_requests do
+        local call = ctx.calls[index]
+        if previous then assert(call.at - previous >= 1 / 120 - 0.000001) end
+        previous = call.at
+    end
+end)
+
+test("Luau.pro no-gain preparation ends afterfour topups with one cleanup and no wall", function()
+    local ctx = context({stock = 1})
+    local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    equal(result.ok, false); equal(result.created, 0); equal(result.diagnostics.prep_stop_reason, "no_gain")
+    equal(result.diagnostics.prep_rounds, 4); equal(ctx.counters.scale, 4); equal(ctx.counters.build, 1)
+    equal(ctx.counters.delete, 1); equal(ctx.counters.paint, nil); equal(result.diagnostics.temporary_block_remaining, false)
+    for i, size in ipairs({100, 50, 25, 12}) do equal(result.diagnostics.prep_samples[i].cohort_limit, size) end
+end)
+
+test("Luau.pro insufficient positive gain stops afterfour rounds instead of inventing inventory", function()
+    local ctx = context({stock = 1, prepGain = 1})
+    local result = run(function() return ctx.adapter.build(plan(100), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    equal(result.ok, false); equal(result.diagnostics.prep_rounds, 4)
+    equal(result.diagnostics.prep_stop_reason, "round_limit"); equal(ctx.counters.delete, 1)
+    equal(ctx.counters.build, 1); equal(ctx.counters.paint, nil)
+end)
+
+test("Luau.pro post-cleanup inventory loss prevents the wall even after a sufficient pre-delete reading", function()
+    local ctx = context({stock = 1, prepGain = 100, afterDelete = function(c) c.stock.Value = 1 end})
+    local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    equal(result.ok, false); assert(result.diagnostics.inventory_before_cleanup >= 4)
+    near(result.diagnostics.inventory_after, 1); equal(result.created, 0); equal(ctx.counters.build, 1)
+    equal(ctx.counters.delete, 1); equal(ctx.counters.paint, nil)
+end)
+
+test("Luau.pro cancellation in shared-helper scaling drains before one cleanup", function()
+    local ctx = context({stock = 1, remoteDelay = 0.1, afterScale = function(c) c.cancel = true end,
+        onDispatch = function(c, stage) if stage == "delete" then equal(c.activePrepScales, 0) end end})
+    local result = run(function() return ctx.adapter.build(materialPlan(20), CFrame.new(), {speed = "Luau.pro",
+        infiniteBlocks = true, shouldCancel = function() return ctx.cancel == true end}) end)
+    equal(result.ok, false); equal(result.created, 0); equal(ctx.counters.delete, 1)
+    equal(ctx.counters.build, 1); equal(sharedEnvironment.__ImageBuilderFlight.pending, 0)
+    equal(result.diagnostics.temporary_block_remaining, false)
+    for stage, tool in pairs(ctx.tools) do equal(tool.Parent, ctx.backpack); equal(ctx.scripts[stage].Disabled, false) end
+end)
+
+test("Luau.pro uncertain shared-helper scale never triggers a deletion or automatic retry", function()
+    local ctx = context({stock = 1, delayStage = "scale", delay = 20})
+    local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    equal(result.ok, false); equal(ctx.counters.build, 1); equal(ctx.counters.scale, 1)
+    equal(ctx.counters.delete, nil); equal(result.diagnostics.prep_stop_reason, "request_pending")
+    equal(result.diagnostics.temporary_block_remaining, true); equal(ctx.adapter.validate(plan()), false)
+    local count = #ctx.calls
+    drain(); equal(#ctx.calls, count); equal(ctx.counters.delete, nil)
+    equal(ctx.tools.scale.Parent, ctx.backpack); equal(sharedEnvironment.__ImageBuilderFlight.pending, 0)
+end)
+
+test("Luau.pro uncertain shared-helper deletion is sentonce and late completion only unlocks", function()
+    local ctx = context({stock = 1, prepGain = 100, delayStage = "delete", delay = 20})
+    local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    equal(result.ok, false); equal(ctx.counters.delete, 1); equal(ctx.counters.build, 1)
+    equal(sharedEnvironment.__ImageBuilderFlight.pending, 1); equal(ctx.adapter.validate(plan()), false)
+    local count = #ctx.calls
+    drain(); equal(#ctx.calls, count); equal(ctx.counters.delete, 1); equal(ctx.counters.build, 1)
+    equal(sharedEnvironment.__ImageBuilderFlight.pending, 0); equal(ctx.built[1].Parent, nil)
+end)
+
+test("Luau.pro ambiguous helper identification leaves every candidate unmodified", function()
+    local ctx = context({stock = 1, returnNil = true, afterBuild = function(c)
+        c.manual = c:addBlock(c.built[1].PPart.CFrame)
+    end})
+    local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    equal(result.ok, false); has(result.message, "multiple new blocks")
+    equal(ctx.counters.scale, nil); equal(ctx.counters.delete, nil); equal(ctx.counters.build, 1)
+    near(ctx.manual.PPart.Size.X, 2); near(ctx.built[1].PPart.Size.X, 2)
+end)
+
+test("Luau.pro helper identification excludes preexisting returned instances", function()
+    local ctx = context({stock = 1, returnOld = true, prepGain = 100})
+    ctx.preexisting = ctx:addBlock(CFrame.new(0, -250000, 0))
+    local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    assert(result.ok, result.message); equal(ctx.deleted[1], ctx.built[1])
+    equal(ctx.preexisting.Parent, ctx.folder); near(ctx.preexisting.PPart.Size.X, 2)
+    for _, model in ipairs(ctx.scaled) do assert(model ~= ctx.preexisting) end
+end)
+
+test("Luau.pro moved shared helper is never changed again or deleted outside its owner's folder", function()
+    local ctx = context({stock = 1, afterScale = function(c) parent(c.built[1], c.otherFolder) end})
+    ctx.otherFolder = parent(instance("Folder", "OtherPlayer"), ctx.folder.Parent)
+    local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    equal(result.ok, false); equal(ctx.counters.scale, 1); equal(ctx.counters.delete, nil)
+    equal(ctx.counters.build, 1); equal(ctx.built[1].Parent, ctx.otherFolder)
+end)
+
+test("Luau.pro rejected preparation scale cleans only its known helper and stops", function()
+    local ctx = context({stock = 1, declineStage = "scale"})
+    ctx.preexisting = ctx:addBlock(CFrame.new(0, -250000, 0))
+    local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    equal(result.ok, false); equal(ctx.counters.scale, 1); equal(ctx.counters.delete, 1)
+    equal(ctx.deleted[1], ctx.built[1]); equal(ctx.preexisting.Parent, ctx.folder); equal(ctx.counters.paint, nil)
+end)
+
+test("Luau.pro waits for post-delete material replication without another helper", function()
+    local ctx = context({stock = 1, prepGain = 100, prepGainOnDelete = true, prepGainDelay = 1})
+    local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    assert(result.ok, result.message); equal(result.diagnostics.prep_rounds, 4)
+    equal(ctx.counters.delete, 1); equal(ctx.counters.build, 5)
+    near(result.diagnostics.inventory_before_cleanup, 0); near(result.diagnostics.inventory_after, 401)
+end)
+
+test("Luau.pro white helper keeps source dimensions pose and eight-argument placement", function()
+    local ctx = context({stock = 1, prepGain = 100, teamName = "White"})
+    ctx.zone.CFrame = CFrame.new(10, 0, 20) * CFrame.Angles(0, math.pi / 2, 0)
+    local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(10, 0, 20),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    assert(result.ok, result.message)
+    local a, b = ctx.calls[1].args, ctx.calls[2].args
+    equal(a.n, 8); equal(a[3], ctx.zone); equal(a[5], true); equal(a[6], nil); equal(a[7], nil); equal(a[8], false)
+    equal(b[1], ctx.built[1]); near(b[2].X, 1.1755e-38); near(b[2].Y, 2048); near(b[2].Z, 390.632)
+    near(b[3].Position.X, 10); near(b[3].Position.Y, -250000); near(b[3].Position.Z, 20)
+    near(b[3].yaw, math.rad(40.135)); near((ctx.zone.CFrame * a[4]).Position.Y, -250000)
+end)
+
+test("Luau.pro unconfirmed helper removal is never retried and prevents wall placement", function()
+    local ctx = context({stock = 1, prepGain = 100, noDeleteEffect = true})
+    local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    equal(result.ok, false); equal(ctx.counters.delete, 1); equal(ctx.counters.build, 1)
+    equal(result.diagnostics.temporary_block_remaining, true); equal(ctx.counters.paint, nil)
+end)
+
+test("Luau.pro enforces4096 total preparation calls across its four retained-helper rounds", function()
+    local ctx = context({stock = 1})
+    local result = run(function() return ctx.adapter.build(materialPlan(1000), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    equal(result.ok, false); equal(result.diagnostics.prep_scale_requests, 4096)
+    equal(result.diagnostics.prep_stop_reason, "request_limit"); equal(result.diagnostics.prep_rounds, 4)
+    equal(ctx.counters.scale, 4096); equal(ctx.counters.build, 1); equal(ctx.counters.delete, 1)
+    equal(result.created, 0); equal(result.diagnostics.temporary_block_remaining, false)
+end)
+
+test("Luau.pro excessive material request stops before creating a shared helper", function()
+    local ctx = context({stock = 1})
+    local result = run(function() return ctx.adapter.build(materialPlan(5000), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true}) end)
+    equal(result.ok, false); equal(#ctx.calls, 0); has(result.message, "4096 scale requests")
+end)
+
+test("Luau.pro native selection during shared-helper work drains calls and preserves manual controls", function()
+    local ctx = context({stock = 1, prepGain = 100, remoteDelay = 0.3})
+    local getter = nativeControllers(ctx)
+    ctx.settings.afterScale = function(c, count)
+        if count == 1 then c.selection = {revision = 1, tool = c.tools.paint, available = true} end
+    end
+    ctx.onNativeEquip = function(stage)
+        if stage == "paint" then equal(sharedEnvironment.__ImageBuilderFlight.pending, 0); ctx.applied = true end
+    end
+    local result = run(function() return ctx.adapter.build(materialPlan(20), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true, getManualToolSelection = getter}) end)
+    assert(result.ok, result.message); equal(ctx.applied, true); assert(result.diagnostics.manual_drains >= 1)
+    equal(ctx.counters.delete, 1); equal(ctx.nativeActive.paint, true); equal(ctx.tools.paint.Parent, ctx.character)
+end)
+
+test("Luau.pro cancellation after shared-helper cleanup cannot start the wall", function()
+    local ctx = context({stock = 1, prepGain = 100, afterDelete = function(c) c.cancel = true end})
+    local result = run(function() return ctx.adapter.build(plan(4), CFrame.new(),
+        {speed = "Luau.pro", infiniteBlocks = true, shouldCancel = function() return ctx.cancel == true end}) end)
+    equal(result.ok, false); equal(ctx.counters.delete, 1); equal(ctx.counters.build, 1)
+    equal(result.created, 0); equal(result.diagnostics.temporary_block_remaining, false)
+    equal(sharedEnvironment.__ImageBuilderFlight.pending, 0)
+end)
+
+test("Luau.pro ownership loss between painting and resize prevents a foreign scale", function()
+    local ctx = context({stock = 1000, afterPaint = function(c, count)
+        if count == 2 then c.moved = c.painted[#c.painted]; parent(c.moved, c.otherFolder) end
+    end})
+    ctx.otherFolder = parent(instance("Folder", "OtherPlayer"), ctx.folder.Parent)
+    local result = run(function() return ctx.adapter.build(gridPlan(130), CFrame.new(), {speed = "Luau.pro"}) end)
+    equal(result.ok, false); equal(result.completed, 1)
+    for _, model in ipairs(ctx.scaled) do assert(model ~= ctx.moved) end
+    near(ctx.moved.PPart.Size.X, 2); equal(ctx.moved.Parent, ctx.otherFolder)
+end)
+
 print("MOCK_GAME_ADAPTER_TESTS_PASSED " .. tostring(tests))

@@ -34,7 +34,7 @@ local inventoryRefreshing = false
 local generation = 0
 local plan, placeTool, ghost, placement, renderConnection, placementAllowed, placementReason
 local toolConnections, connections, inventory = {}, {}, {}
-local selectedBlock, speed, yaw = nil, "Rapid", 0
+local selectedBlock, speed, yaw = nil, "Luau.pro", 0
 local toolMode = "background"
 local infiniteBlocks = true
 local qualityIndex = 1
@@ -196,7 +196,7 @@ sectionTitle(materialCard, "03", "Material & building")
 local blockButton = button(materialCard, "Reading your inventory...", 14, 39, 316, 34)
 local refreshButton = button(materialCard, "Refresh", 338, 39, 88, 34)
 local toolModeButton = button(materialCard, "Tools: Hands free  >", 14, 84, 246, 34)
-local speedButton = button(materialCard, "Speed: Rapid  v", 268, 84, 158, 34)
+local speedButton = button(materialCard, "Speed: Luau.pro  v", 268, 84, 158, 34)
 local infiniteButton = button(materialCard, "Infinite Blocks: ON  (verify inventory)", 14, 129, 412, 34)
 infiniteButton.TextColor3 = C.green
 local explanation = label(materialCard,
@@ -242,7 +242,7 @@ local blockMenu = create("ScrollingFrame", {
 round(blockMenu, 9)
 create("UIStroke", { Color = C.blue, Thickness = 1 }, blockMenu)
 local speedMenu = create("Frame", {
-    Position = UDim2.fromOffset(294, 170), Size = UDim2.fromOffset(162, 141),
+    Position = UDim2.fromOffset(294, 170), Size = UDim2.fromOffset(162, 174),
     BackgroundColor3 = C.field, BorderSizePixel = 0, Visible = false, ZIndex = 20,
 }, panel)
 round(speedMenu, 9)
@@ -423,7 +423,7 @@ connect(toolModeButton.Activated, function()
     if busy() then return end
     toolMode = toolMode == "compatible" and "background" or "compatible"
     local compatible = toolMode == "compatible"
-    if compatible and speed == "Rapid" then
+    if compatible and (speed == "Rapid" or speed == "Luau.pro") then
         speed = "Fast"
         speedButton.Text = "Speed: Fast  v"
     end
@@ -524,20 +524,21 @@ connect(speedButton.Activated, function()
     anchorMenu(speedMenu, speedButton)
     speedMenu.Visible = not speedMenu.Visible
 end)
-for index, name in ipairs({ "Normal", "Fast", "Turbo", "Rapid" }) do
+for index, name in ipairs({ "Luau.pro", "Normal", "Fast", "Turbo", "Rapid" }) do
     local choice = button(speedMenu, name, 5, 5 + (index - 1) * 33, 152, 29)
     choice.ZIndex = 21
     connect(choice.Activated, function()
         if busy() then return end
-        if name == "Rapid" and toolMode ~= "background" then
+        if (name == "Rapid" or name == "Luau.pro") and toolMode ~= "background" then
             speedMenu.Visible = false
-            setStatus("Select Hands free tools to use Rapid speed.", C.yellow)
+            setStatus("Select Hands free tools to use " .. name .. " mode.", C.yellow)
             return
         end
         speed = name
         speedButton.Text = "Speed: " .. name .. "  v"
         speedMenu.Visible = false
-        setStatus(name == "Rapid" and "Rapid adjusts to the game's response time and slows down when block updates fall behind. Only verified blocks count toward progress."
+        setStatus(name == "Luau.pro" and "Luau.pro method: prepare material, place, paint, then resize. Uses bounded parallel work and counts only confirmed blocks."
+            or name == "Rapid" and "Rapid adjusts to the game's response time and slows down when block updates fall behind. Only verified blocks count toward progress."
             or (name == "Turbo" and "Turbo uses bounded parallel requests. The game can still limit build speed." or (name .. " speed selected.")))
     end)
 end
@@ -785,7 +786,9 @@ local function sendTelemetry(buildPlan, ok, result, buildToolMode, buildInfinite
             infinite_requested = diag.infinite_requested == true,
             material_required = tonumber(diag.material_required),
             inventory_before = tonumber(diag.inventory_before),
+            inventory_before_cleanup = tonumber(diag.inventory_before_cleanup),
             inventory_after = tonumber(diag.inventory_after),
+            preparation_request_rate = tonumber(diag.preparation_request_rate),
             prep_requests = tonumber(diag.prep_requests),
             prep_version = tonumber(diag.prep_version),
             prep_rounds = tonumber(diag.prep_rounds),
@@ -804,6 +807,8 @@ local function sendTelemetry(buildPlan, ok, result, buildToolMode, buildInfinite
             manual_selection_revision = tonumber(diag.manual_selection_revision),
             pipeline_version = tonumber(diag.pipeline_version),
             pipeline_windows = tonumber(diag.pipeline_windows),
+            placement_cohorts = tonumber(diag.placement_cohorts),
+            resize_windows = tonumber(diag.resize_windows),
             pipeline_peak_ready = tonumber(diag.pipeline_peak_ready),
             pipeline_peak_active = tonumber(diag.pipeline_peak_active),
             pipeline_paint_batches = tonumber(diag.pipeline_paint_batches),
@@ -845,6 +850,7 @@ local function sendTelemetry(buildPlan, ok, result, buildToolMode, buildInfinite
                     table.insert(report.diagnostics.prep_samples, {
                         before = tonumber(sample.before), after = tonumber(sample.after),
                         requests = tonumber(sample.requests), gain = tonumber(sample.gain),
+                        cohort_limit = tonumber(sample.cohort_limit),
                     })
                 end
             end

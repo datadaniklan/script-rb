@@ -17,9 +17,21 @@ All filesystem paths are relative, such as `baft image builder/builder_a.lua`. S
 1. Paste a **direct PNG or JPEG image URL**.
 2. Choose wall width, resolution, material, and quality. Select **Convert image**.
 3. Select **Place**, aim the green preview, and click. **R** rotates 90 degrees; **Q/E** rotate 15 degrees.
-4. Hands free is selected initially. Select tools from the game's normal hotbar while building. Rapid adjusts its workload when game responses slow down.
+4. **Hands free**, **Luau.pro** speed and **Infinite Blocks** are selected initially. Select tools from the game's normal hotbar while building; use **Stop** to cancel. Choose Rapid for the existing adaptive pipeline, or a lower speed if needed.
 
 Run the same link again to obtain the latest published version. A saved `baft image builder/start.lua` contains the same online launcher. The loader stops visibly on a failed update; it does not silently run an old version. Only one builder operation should run at a time.
+
+## Luau.pro method in version 3.1.0
+
+The image-builder adapter now has a **Luau.pro** profile. It ports the recovered material-preparation lifecycle and staged image placement into this builder. It is an independent implementation of those methods; the original Luau.pro engine and its unresolved helper bindings are not bundled or invoked.
+
+- **Material preparation:** when stock is short and Infinite Blocks is enabled, reuse one newly identified helper for up to four top-up rounds, then remove it. Check actual inventory both before and after cleanup; image building starts only with sufficient verified material. At least one available block is needed to begin preparation.
+- **Image placement:** place in cohorts of up to 50, identify the new owned models, paint them in batches, then resize in windows of up to 150. Larger images use bounded work windows. Position, size, orientation and color must pass the existing final checks before a block counts as completed.
+- **Hands-free operation:** keep the normal game hotbar and manual tool selection, cancellation, tool restoration and protection against starting another build while earlier requests are still unresolved.
+
+The Luau.pro profile has finite limits: at most 64 requests in flight, a wall-building dispatch ceiling of 600 requests per second, and a lower preparation dispatch ceiling of 120 per second. These are limits on requests, not a promised completed-block rate. Actual throughput depends on server responses and verification. Rapid remains available with its adaptive workload. Selecting Compatible tool mode changes either of these background-only profiles to Fast.
+
+This update applies only to the image builder. It does not modify the separate AI builder.
 
 ## Image quality
 

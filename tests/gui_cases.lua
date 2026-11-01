@@ -76,7 +76,7 @@ test("hands free and material preparation are enabled by default", function()
     assert(#ctx.calls == 1 and ctx.calls[1].origin == origin)
     assert(ctx.calls[1].options.infiniteBlocks == true)
     assert(ctx.calls[1].options.toolMode == "background")
-    assert(ctx.calls[1].options.speed == "Rapid" and ctx.telemetry[1].speed == "Rapid")
+    assert(ctx.calls[1].options.speed == "Luau.pro" and ctx.telemetry[1].speed == "Luau.pro")
     assert(ctx.telemetry[1].enabled == true)
 end)
 
@@ -389,6 +389,23 @@ test("preparation reports preserve measured gains and bound per-round diagnostic
     assert(#diag.prep_samples == 32 and diag.prep_samples[32].after == 32.5 and diag.prep_samples[1].ignored == nil)
 end)
 
+test("Luau.pro reports retain staged work and inventory before cleanup", function()
+    local ctx = telemetryContext()
+    ctx.send({placement_count = 452}, true, {ok = true, completed = 452, diagnostics = {
+        speed_mode = "Luau.pro", pipeline_version = 3, prep_version = 3,
+        placement_cohorts = 11, resize_windows = 5, inventory_before_cleanup = 510,
+        inventory_after = 511, preparation_request_rate = 120,
+        prep_samples = {{before = 1, after = 510, requests = 6, gain = 509, cohort_limit = 100}},
+    }}, "background", true, "Luau.pro")
+    local body = ctx.sent[1]
+    local diag = body.result.diagnostics
+    assert(body.settings.speed == "Luau.pro" and diag.speed_mode == "Luau.pro")
+    assert(diag.pipeline_version == 3 and diag.prep_version == 3)
+    assert(diag.placement_cohorts == 11 and diag.resize_windows == 5)
+    assert(diag.inventory_before_cleanup == 510 and diag.inventory_after == 511)
+    assert(diag.preparation_request_rate == 120 and diag.prep_samples[1].cohort_limit == 100)
+end)
+
 local function speedContext()
     --[[SPEED_INITIAL]]
     local speedMenu, blockMenu, explanation = {}, {}, {}
@@ -416,18 +433,22 @@ local function speedContext()
         messages = messages,
     }
 end
-test("Rapid is selected initially and incompatible mode falls back visibly to Fast", function()
+test("Luau.pro is selected initially and incompatible mode falls back visibly to Fast", function()
     local ctx = speedContext()
-    assert(ctx.speed() == "Rapid" and ctx.mode() == "background")
+    assert(ctx.speed() == "Luau.pro" and ctx.mode() == "background")
     ctx.changeMode(); assert(ctx.speed() == "Fast" and ctx.mode() == "compatible")
+    ctx.choose("Luau.pro"); assert(ctx.speed() == "Fast")
+    assert(ctx.messages[#ctx.messages]:find("Select Hands free", 1, true))
     ctx.choose("Rapid"); assert(ctx.speed() == "Fast")
     assert(ctx.messages[#ctx.messages]:find("Select Hands free", 1, true))
     ctx.changeMode(); ctx.choose("Rapid"); assert(ctx.speed() == "Rapid")
+    ctx.choose("Luau.pro"); assert(ctx.speed() == "Luau.pro")
+    assert(ctx.messages[#ctx.messages]:find("place, paint, then resize", 1, true))
 end)
 test("running builds keep their speed and tool mode while controls are clicked", function()
     local ctx = speedContext(); ctx.running(true)
     ctx.choose("Normal"); ctx.changeMode()
-    assert(ctx.speed() == "Rapid" and ctx.mode() == "background")
+    assert(ctx.speed() == "Luau.pro" and ctx.mode() == "background")
     ctx.running(false); ctx.choose("Normal"); assert(ctx.speed() == "Normal")
 end)
 

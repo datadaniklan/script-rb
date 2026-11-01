@@ -183,9 +183,12 @@ function Adapter.build(plan, origin, options)
     local required = Adapter.materialNeed(plan)
     local presets = {Normal = {rate = 8, workers = 1, batch = 4},
         Fast = {rate = 60, workers = 4, batch = 32}, Turbo = {rate = 120, workers = 8, batch = 64},
-        Rapid = {rate = 120, workers = 16, maxRate = 600, maxWorkers = 64, batch = 256, cohort = 16, paint = 32}}
+        Rapid = {rate = 120, workers = 16, maxRate = 600, maxWorkers = 64, batch = 256, cohort = 16, paint = 32},
+        ["Luau.pro"] = {rate = 600, workers = 64, maxRate = 600, maxWorkers = 64,
+            batch = 300, cohort = 50, paint = 32, resize = 150}}
     local selectedSpeed = presets[options.speed] and options.speed or "Fast"
-    local speedMode = toolMode == "compatible" and selectedSpeed == "Rapid" and "Fast" or selectedSpeed
+    local speedMode = toolMode == "compatible" and (selectedSpeed == "Rapid" or selectedSpeed == "Luau.pro")
+        and "Fast" or selectedSpeed
     local speed = presets[speedMode]
     local wallStarted
     local completed, created, nextSend, failure = 0, 0, 0, nil
@@ -206,7 +209,8 @@ function Adapter.build(plan, origin, options)
     local diagnostics = {tool_mode = toolMode, phase = "starting", requests_sent = 0,
         selected_speed_mode = selectedSpeed, speed_mode = speedMode, effective_request_rate = speed.rate,
         worker_limit = speed.workers, batch_limit = speed.batch, peak_pending = 0, peak_geometry_jobs = 0,
-        pipeline_version = speedMode == "Rapid" and 2 or 0, pipeline_windows = 0,
+        pipeline_version = speedMode == "Rapid" and 2 or speedMode == "Luau.pro" and 3 or 0, pipeline_windows = 0,
+        placement_cohorts = 0, resize_windows = 0,
         pipeline_peak_ready = 0, pipeline_peak_active = 0, pipeline_paint_batches = 0, manual_drains = 0,
         rpc_completed = 0, rpc_latency_total_seconds = 0, rpc_latency_max_seconds = 0,
         max_request_rate = speed.maxRate or speed.rate, max_pending_limit = speed.maxWorkers or speed.workers,
@@ -219,7 +223,8 @@ function Adapter.build(plan, origin, options)
         observed_new_models = 0, observed_material_models = 0, returned_type = "none",
         infinite_requested = options.infiniteBlocks == true, material_required = required,
         inventory_before = Adapter.available(plan.block_type), prep_requests = 0,
-        prep_version = 2, prep_rounds = 0, prep_scale_requests = 0, prep_gain = 0, prep_samples = {}}
+        prep_version = speedMode == "Luau.pro" and 3 or 2,
+        prep_rounds = 0, prep_scale_requests = 0, prep_gain = 0, prep_samples = {}}
     local adaptive = {rate = speed.rate, workers = speed.workers, latency = nil, recentMax = 0,
         healthyCalls = 0, nextIncrease = os.clock() + 3, lastDecrease = -math.huge,
         pausePlacements = false, overshoot = 0}
@@ -269,7 +274,7 @@ function Adapter.build(plan, origin, options)
         elseif elapsed < 0.45 then adaptive.healthyCalls += 1 end
     end
     local function verificationBudget()
-        if speedMode ~= "Rapid" then return 4 end
+        if speedMode ~= "Rapid" and speedMode ~= "Luau.pro" then return 4 end
         local budget = math.max(8, math.min(24, 4 + (adaptive.latency or 0) * 4 + adaptive.recentMax * 1.5))
         diagnostics.verification_budget_seconds = math.max(diagnostics.verification_budget_seconds, budget)
         return budget
@@ -746,7 +751,7 @@ function Adapter.build(plan, origin, options)
                 end
             end
             if found then claimed[found] = true; return found end
-        end, speedMode == "Rapid" and verificationBudget() or 5)
+        end, (speedMode == "Rapid" or speedMode == "Luau.pro") and verificationBudget() or 5)
     end
     local function geometryCorrect(job)
         local model = job.model
@@ -911,6 +916,104 @@ function Adapter.build(plan, origin, options)
             diagnostics.prep_stop_reason = code
             return fail(string.format("Infinite Blocks preparation %s: started with %.3f, now %.3f available; %.3f more needed (%d required). The wall was not started.",
                 reason, before, after, math.max(0, required - after), required))
+        end
+        if speedMode == "Luau.pro" then
+            -- Source-derived lifecycle: retain one identified helper across at
+            -- most four top-ups, then delete once. The recovered source's
+            -- fire-and-forget groups are replaced with bounded, drained pools.
+            -- This is an adapter port, not execution of its captured VM/API.
+            for _, model in ipairs(folder:GetChildren()) do existing[model] = true end
+            helper, helperPossible, deleteAttempted = nil, false, false
+            diagnostics.phase = "preparing_place"
+            local remote = ownedRemote("BuildingTool")
+            if not remote then return false end
+            local priorRequests = diagnostics.prep_requests
+            local accepted, result = invoke(remote, plan.block_type, stock(plan.block_type), zone,
+                zone.CFrame:ToObjectSpace(cf), true, nil, nil, false)
+            helperPossible = diagnostics.prep_requests > priorRequests
+            if not accepted then return false end
+            if typeof(result) == "Instance" and result:IsA("BasePart") then result = result.Parent end
+            helper = waitFor(function()
+                if typeof(result) == "Instance" and validHelper(result) then return result end
+                local found
+                for _, model in ipairs(folder:GetChildren()) do
+                    if validHelper(model) and (model.PPart.Position - cf.Position).Magnitude <= 0.02 then
+                        if found then
+                            fail("Infinite Blocks preparation found multiple new blocks at the staging position. None were scaled or deleted.")
+                            return nil
+                        end
+                        found = model
+                    end
+                end
+                return found
+            end, 5)
+            if not helper then
+                return fail("Infinite Blocks preparation could not identify its new temporary block. No block was scaled or deleted.")
+            end
+            if stopped() then return false end
+            pipelineActive = true
+            local groupSize = 100
+            for round = 1, 4 do
+                if stopped() then return false end
+                local roundBefore = Adapter.available(plan.block_type)
+                if roundBefore >= required then break end
+                local remainingBudget = 4096 - diagnostics.prep_scale_requests
+                if remainingBudget <= 0 then break end
+                local count = math.min(math.max(1, math.ceil((required - roundBefore) / 99.0017938123301)), remainingBudget)
+                diagnostics.prep_rounds = round
+                prepSample = {before = roundBefore, after = roundBefore, requests = 0, gain = 0, cohort_limit = groupSize}
+                table.insert(diagnostics.prep_samples, prepSample)
+                diagnostics.phase = "preparing_scale"
+                remote = ownedRemote("ScalingTool")
+                if not remote then return false end
+                report(string.format("Preparing material: shared helper, round %d / 4; %.3f / %d available...",
+                    round, roundBefore, required))
+                for offset = 1, count, groupSize do
+                    local calls = {}
+                    for index = offset, math.min(count, offset + groupSize - 1) do table.insert(calls, index) end
+                    if not runPool(calls, function()
+                        if not validHelper(helper) then return fail("The identified preparation block was removed or changed. Stopped.") end
+                        return invoke(remote, helper, size, cf)
+                    end, math.min(speed.workers, groupSize)) then return false end
+                end
+                -- Every scale in this round has replied. Observe actual stock
+                -- while this exact helper is still alive, as in the source.
+                diagnostics.phase = "preparing_verify"
+                local deadline = os.clock() + 5
+                repeat
+                    if stopped() then return false end
+                    if not validHelper(helper) then return fail("The identified preparation block was removed or changed. Stopped.") end
+                    if Adapter.available(plan.block_type) >= required then break end
+                    task.wait(0.03)
+                until os.clock() >= deadline
+                prepSample.after = Adapter.available(plan.block_type)
+                prepSample.gain = prepSample.after - roundBefore
+                diagnostics.inventory_before_cleanup = prepSample.after
+                prepSample = nil
+                groupSize = math.max(math.floor(groupSize / 2), 10)
+            end
+            pipelineActive, manualDrain = false, false
+            if stopped() then return false end
+            if not removeHelper() then return fail("The game did not confirm removal of the temporary preparation block.") end
+            existing[helper] = true
+            diagnostics.phase = "preparing_verify"
+            report("Checking available material after shared-helper cleanup...")
+            local deadline = os.clock() + 5
+            repeat
+                if stopped() then return false end
+                if Adapter.available(plan.block_type) >= required then break end
+                task.wait(0.03)
+            until os.clock() >= deadline
+            local after = Adapter.available(plan.block_type)
+            diagnostics.inventory_after, diagnostics.prep_gain = after, after - before
+            if after < required then
+                local code = diagnostics.prep_scale_requests >= 4096 and "request_limit"
+                    or after <= before and "no_gain" or "round_limit"
+                return preparationFailed(code, "finished its bounded shared-helper top-ups without sufficient verified material")
+            end
+            diagnostics.preparation_status, diagnostics.prep_stop_reason = "verified", "satisfied"
+            restoreHeldTool()
+            return true
         end
         while Adapter.available(plan.block_type) < required do
             if stopped() then return false end
@@ -1108,6 +1211,80 @@ function Adapter.build(plan, origin, options)
         end
         report(string.format("Verified %d / %d blocks", completed, #items))
         return true
+    end
+
+    local function doLuauWindow(jobs, first)
+        -- Preserve the recovered image runner's phase order while retaining
+        -- this adapter's observed placement protocol and exact owned-instance
+        -- matching. No authorization stream or unresolved reconciler is used.
+        pipelineActive = true
+        if not first then diagnostics.pipeline_windows += 1 end
+        diagnostics.phase = "placing"
+        report(first and "Checking Luau.pro placement, paint and resize..." or "Placing image cohorts...")
+        local remote = ownedRemote("BuildingTool")
+        if not remote then return false end
+        for offset = 1, #jobs, speed.cohort do
+            table.clear(added)
+            batchNewCount = 0
+            local cohort = {}
+            for index = offset, math.min(#jobs, offset + speed.cohort - 1) do table.insert(cohort, jobs[index]) end
+            diagnostics.placement_cohorts += 1
+            if not runPool(cohort, function(job)
+                local ok, result = invoke(remote, plan.block_type, stock(plan.block_type), zone,
+                    zone.CFrame:ToObjectSpace(job.cf), true, job.cf, false, true)
+                if not ok then return false end
+                job.result = result
+                if first then diagnostics.returned_type = typeof(result) end
+                return true
+            end, first and 1 or speed.workers) then return false end
+            -- Drain this cohort before matching nil-return observations or
+            -- starting another cohort. Never infer a server ordinal mapping.
+            for _, job in ipairs(cohort) do
+                job.model = identify(job.cf, job.result)
+                if not job.model then
+                    if stopped() then return false end
+                    return fail("The game did not identify a new owned image block. Stopped before painting or resizing this window.")
+                end
+                created += 1
+            end
+        end
+        diagnostics.phase = "painting"
+        report("Painting the identified image blocks...")
+        remote = ownedRemote("PaintingTool")
+        if not remote then return false end
+        for offset = 1, #jobs, speed.paint do
+            local payload = {}
+            for index = offset, math.min(#jobs, offset + speed.paint - 1) do
+                table.insert(payload, {jobs[index].model, jobs[index].color})
+            end
+            diagnostics.pipeline_paint_batches += 1
+            if not invoke(remote, payload) then return false end
+        end
+        diagnostics.phase = "scaling"
+        report("Resizing image windows and verifying the result...")
+        remote = ownedRemote("ScalingTool")
+        if not remote then return false end
+        for offset = 1, #jobs, speed.resize do
+            local resizeJobs = {}
+            for index = offset, math.min(#jobs, offset + speed.resize - 1) do table.insert(resizeJobs, jobs[index]) end
+            diagnostics.resize_windows += 1
+            if not runPool(resizeJobs, function(job)
+                return invoke(remote, job.model, job.size, job.cf)
+            end, first and 1 or speed.workers) then return false end
+            -- The source ignored its final resize wait. Here both geometry and
+            -- color must be observed before any block is reported finished.
+            for _, job in ipairs(resizeJobs) do
+                local started = os.clock()
+                if not waitFor(function() return paintCorrect(job) end, verificationBudget()) then
+                    if stopped() then return false end
+                    return verificationFailure(job, "final", started)
+                end
+                completed += 1
+            end
+            report(string.format("Verified %d / %d blocks", completed, #items))
+        end
+        pipelineActive, manualDrain = false, false
+        return not stopped()
     end
 
     local function doRapidWindow(jobs)
@@ -1314,11 +1491,15 @@ function Adapter.build(plan, origin, options)
         end
         wallStarted = os.clock()
         -- Prove this server accepts all three operations before concurrent work.
-        if not doBatch(makeBatch(1, 1), true) then return end
+        if speedMode == "Luau.pro" then
+            if not doLuauWindow(makeBatch(1, 1), true) then return end
+        elseif not doBatch(makeBatch(1, 1), true) then return end
         local offset = 2
         while offset <= #items and not stopped() do
             local batch = makeBatch(offset, math.min(#items, offset + speed.batch - 1))
-            if speedMode == "Rapid" then
+            if speedMode == "Luau.pro" then
+                if not doLuauWindow(batch, false) then break end
+            elseif speedMode == "Rapid" then
                 if not doRapidWindow(batch) then break end
             elseif not doBatch(batch, false) then break end
             offset += #batch
@@ -1326,6 +1507,9 @@ function Adapter.build(plan, origin, options)
         end
         if holder and holder.active and not stopped() then holder.applyManualSelection() end
     end)
+    -- Failure/timeout can leave a phase before its normal exit. Cleanup must
+    -- never wait on a manual-selection dispatch reservation from that phase.
+    pipelineActive, manualDrain = false, false
     if connection then connection:Disconnect() end
     if not ok then failure = failure or tostring(message) end
     if preparing then
