@@ -87,7 +87,7 @@ test("hands free and material preparation are enabled by default", function()
     assert(#ctx.calls == 1 and ctx.calls[1].origin == origin)
     assert(ctx.calls[1].options.infiniteBlocks == true)
     assert(ctx.calls[1].options.toolMode == "background")
-    assert(ctx.calls[1].options.speed == "Luau.pro" and ctx.telemetry[1].speed == "Luau.pro")
+    assert(ctx.calls[1].options.speed == "Max" and ctx.telemetry[1].speed == "Max")
     assert(ctx.telemetry[1].enabled == true)
 end)
 
@@ -400,7 +400,7 @@ test("preparation reports preserve measured gains and bound per-round diagnostic
         infinite_requested = true, inventory_before = 25195, inventory_after = 25211,
         prep_version = 2, prep_rounds = 32, prep_scale_requests = 32, prep_gain = 16,
         prep_stop_reason = "round_limit", prep_samples = samples,
-        speed_mode = "Rapid", effective_request_rate = 600, peak_pending = 42,
+        speed_mode = "Rapid", selected_speed_mode = "Rapid", effective_request_rate = 600, peak_pending = 42,
         wall_elapsed_seconds = 12.5, verified_blocks_per_second = 0,
         wall_rpc_completed = 50, wall_requests_sent = 51, wall_rpc_latency_mean_seconds = 0.18,
         pipeline_version = 1, pipeline_windows = 4, pipeline_peak_ready = 64, pipeline_peak_active = 768,
@@ -422,6 +422,7 @@ test("preparation reports preserve measured gains and bound per-round diagnostic
     assert(diag.prep_version == 2 and diag.prep_rounds == 32 and diag.prep_scale_requests == 32)
     assert(diag.prep_gain == 16 and diag.prep_stop_reason == "round_limit")
     assert(body.settings.speed == "Rapid" and diag.speed_mode == "Rapid" and diag.effective_request_rate == 600)
+    assert(diag.selected_speed_mode == "Rapid")
     assert(diag.peak_pending == 42 and diag.wall_elapsed_seconds == 12.5 and diag.verified_blocks_per_second == 0)
     assert(diag.wall_rpc_completed == 50 and diag.wall_requests_sent == 51 and diag.wall_rpc_latency_mean_seconds == 0.18)
     assert(diag.pipeline_version == 1 and diag.pipeline_windows == 4 and diag.pipeline_peak_active == 768)
@@ -505,10 +506,12 @@ local function speedContext()
         messages = messages,
     }
 end
-test("Luau.pro is selected initially and incompatible mode falls back visibly to Fast", function()
+test("Max is selected initially and incompatible mode falls back visibly to Fast", function()
     local ctx = speedContext()
-    assert(ctx.speed() == "Luau.pro" and ctx.mode() == "background")
+    assert(ctx.speed() == "Max" and ctx.mode() == "background")
     ctx.changeMode(); assert(ctx.speed() == "Fast" and ctx.mode() == "compatible")
+    ctx.choose("Max"); assert(ctx.speed() == "Fast")
+    assert(ctx.messages[#ctx.messages]:find("Select Hands free", 1, true))
     ctx.choose("Luau.pro"); assert(ctx.speed() == "Fast")
     assert(ctx.messages[#ctx.messages]:find("Select Hands free", 1, true))
     ctx.choose("Rapid"); assert(ctx.speed() == "Fast")
@@ -516,11 +519,13 @@ test("Luau.pro is selected initially and incompatible mode falls back visibly to
     ctx.changeMode(); ctx.choose("Rapid"); assert(ctx.speed() == "Rapid")
     ctx.choose("Luau.pro"); assert(ctx.speed() == "Luau.pro")
     assert(ctx.messages[#ctx.messages]:find("place, paint, then resize", 1, true))
+    ctx.choose("Max"); assert(ctx.speed() == "Max")
+    assert(ctx.messages[#ctx.messages]:find("starts at full speed", 1, true))
 end)
 test("running builds keep their speed and tool mode while controls are clicked", function()
     local ctx = speedContext(); ctx.running(true)
     ctx.choose("Normal"); ctx.changeMode()
-    assert(ctx.speed() == "Luau.pro" and ctx.mode() == "background")
+    assert(ctx.speed() == "Max" and ctx.mode() == "background")
     ctx.running(false); ctx.choose("Normal"); assert(ctx.speed() == "Normal")
 end)
 

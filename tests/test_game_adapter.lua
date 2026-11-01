@@ -2649,4 +2649,131 @@ test("Luau.pro final wall RPC metrics exclude successful material preparation", 
     equal(wallReports[1].completedRequests, 0); equal(wallReports[1].rpcMeanSeconds, 0)
 end)
 
+
+test("Max starts at600 by64 with exact300-model matching and serial32-model painting", function()
+    local ctx = context({stock = 2000, returnNil = true, remoteDelay = 0.18,
+        afterBuild = function(c, count)
+            if count == 2 then c.manual = c:addBlock(CFrame.new(50, 3, 50)) end
+        end})
+    ctx.preexisting = ctx:addBlock(CFrame.new())
+    local firstReport
+    local result = run(function() return ctx.adapter.build(gridPlan(601), CFrame.new(), {speed = "Max",
+        onProgress = function(_, _, _, detail)
+            if detail and detail.kind == "wall" and not firstReport then firstReport = detail end
+        end}) end)
+    assert(result.ok, result.message); equal(result.completed, 601); equal(result.created, 601)
+    equal(firstReport.requestRate, 600); equal(firstReport.workerLimit, 64)
+    equal(result.diagnostics.selected_speed_mode, "Max"); equal(result.diagnostics.speed_mode, "Luau.pro")
+    equal(result.diagnostics.placement_cohorts, 3); equal(result.diagnostics.resize_windows, 3)
+    equal(result.diagnostics.peak_geometry_jobs, 300); equal(result.diagnostics.adaptive_peak_rate, 600)
+    equal(result.diagnostics.adaptive_peak_workers, 64); equal(ctx.maxRemoteCalls, 64)
+    equal(ctx.maxPaintCalls, 1); equal(ctx.counters.paint, 21)
+    local painted, scaled = {}, {}
+    for _, model in ipairs(ctx.painted) do
+        assert(not painted[model] and model ~= ctx.preexisting and model ~= ctx.manual)
+        painted[model] = true
+    end
+    for _, model in ipairs(ctx.scaled) do
+        assert(not scaled[model] and painted[model]); scaled[model] = true
+    end
+    equal(#ctx.painted, 601); equal(#ctx.scaled, 601)
+    for index, call in ipairs(ctx.calls) do
+        if call.stage == "paint" then assert(#call.args[1] <= 32) end
+        if index > 1 then assert(call.at - ctx.calls[index - 1].at >= 1 / 600 - 0.000001) end
+    end
+    near(ctx.preexisting.PPart.Size.X, 2); near(ctx.manual.PPart.Size.X, 2)
+end)
+
+test("Compatible Max uses Fast without changing the requested profile", function()
+    local ctx = context({stock = 100, allowEquip = true, requireHeld = true, remoteDelay = 0.1})
+    local result = run(function() return ctx.adapter.build(plan(35), CFrame.new(),
+        {speed = "Max", toolMode = "compatible"}) end)
+    assert(result.ok, result.message); equal(result.diagnostics.selected_speed_mode, "Max")
+    equal(result.diagnostics.speed_mode, "Fast"); equal(result.diagnostics.effective_request_rate, 60)
+    equal(result.diagnostics.worker_limit, 4); assert(ctx.maxRemoteCalls <= 4)
+end)
+
+test("Max keeps its fixed bounded budget under slow replies while recording latency", function()
+    local ctx = context({stock = 1000, remoteDelay = 2})
+    local result = run(function() return ctx.adapter.build(gridPlan(101), CFrame.new(), {speed = "Max"}) end)
+    assert(result.ok, result.message); equal(result.completed, 101)
+    equal(result.diagnostics.adaptive_peak_rate, 600); equal(result.diagnostics.adaptive_peak_workers, 64)
+    equal(result.diagnostics.adaptive_sustained_backoffs, 0)
+    equal(result.diagnostics.adaptive_downshifts, 0); equal(result.diagnostics.adaptive_upshifts, 0)
+    equal(result.diagnostics.effective_request_rate, 600); equal(result.diagnostics.worker_limit, 64)
+    near(result.diagnostics.rpc_latency_ewma_seconds, 2)
+    assert(ctx.maxRemoteCalls <= 64)
+end)
+
+test("Max cannot pass the first proof when paint is unconfirmed", function()
+    local ctx = context({noPaint = true})
+    local result = run(function() return ctx.adapter.build(gridPlan(301), CFrame.new(), {speed = "Max"}) end)
+    equal(result.ok, false); equal(result.completed, 0); equal(ctx.counters.build, 1)
+    equal(ctx.counters.paint, 1); equal(ctx.counters.scale, 1)
+end)
+
+test("Max ambiguous nil return in a300-model cohort blocks the entire window paint", function()
+    local ctx = context({stock = 1000, returnNil = true, afterBuild = function(c, count)
+        if count == 301 then c.ambiguous = c.built[count]; c.manual = c:addBlock(c.ambiguous.PPart.CFrame) end
+    end})
+    local result = run(function() return ctx.adapter.build(gridPlan(601), CFrame.new(), {speed = "Max"}) end)
+    equal(result.ok, false); equal(result.completed, 1); equal(ctx.counters.build, 301)
+    equal(#ctx.painted, 1); equal(#ctx.scaled, 1); has(result.message, "Multiple new blocks")
+    near(ctx.manual.PPart.Size.X, 2); near(ctx.ambiguous.PPart.Size.X, 2)
+end)
+
+test("Max cancellation drains admitted placements without painting unfinished windows", function()
+    local ctx = context({stock = 1000, remoteDelay = 0.1, afterBuild = function(c, count)
+        if count == 2 then c.cancel = true end
+    end})
+    local result = run(function() return ctx.adapter.build(gridPlan(601), CFrame.new(), {speed = "Max",
+        shouldCancel = function() return ctx.cancel == true end}) end)
+    equal(result.ok, false); equal(result.completed, 1); equal(ctx.counters.paint, 1); equal(ctx.counters.scale, 1)
+    assert(ctx.counters.build <= 65); equal(sharedEnvironment.__ImageBuilderFlight.pending, 0)
+    equal(ctx.tools.build.Parent, ctx.backpack)
+end)
+
+test("Max uncertain resize retains its lock and never retries the queued window", function()
+    local ctx = context({stock = 1000, remoteDelay = 0.1, afterPaint = function(c, count)
+        if count == 2 then c.settings.delayStage, c.settings.delay = "scale", 20 end
+    end})
+    local result = run(function() return ctx.adapter.build(gridPlan(301), CFrame.new(), {speed = "Max"}) end)
+    equal(result.ok, false); equal(result.completed, 1)
+    assert(sharedEnvironment.__ImageBuilderFlight.pending > 0); equal(ctx.adapter.validate(plan()), false)
+    equal(result.diagnostics.tool_restore_pending, true); assert(ctx.maxRemoteCalls <= 64)
+    local calls = #ctx.calls
+    drain(); equal(#ctx.calls, calls); equal(sharedEnvironment.__ImageBuilderFlight.pending, 0)
+    equal(sharedEnvironment.__ImageBuilderFlight.busy, false); equal(ctx.tools.scale.Parent, ctx.backpack)
+end)
+
+test("Max manual native selection drains pending requests before activating", function()
+    local ctx = context({stock = 1000, remoteDelay = 0.2, frameStep = 1 / 60})
+    local getter = nativeControllers(ctx)
+    ctx.settings.afterBuild = function(c, count)
+        if count == 2 then c.selection = {revision = 1, tool = c.tools.paint, available = true} end
+    end
+    ctx.onNativeEquip = function(stage)
+        if stage == "paint" then equal(sharedEnvironment.__ImageBuilderFlight.pending, 0); ctx.applied = true end
+    end
+    local result = run(function() return ctx.adapter.build(gridPlan(301), CFrame.new(),
+        {speed = "Max", getManualToolSelection = getter}) end)
+    assert(result.ok, result.message); equal(result.completed, 301); equal(ctx.applied, true)
+    assert(result.diagnostics.manual_drains >= 1); equal(ctx.nativeActive.paint, true)
+end)
+
+test("Max preserves the100-call preparation bound and120-per-second cohort pacing", function()
+    local ctx = context({stock = 1, prepGain = 100, delayStage = "scale", delay = 0.5})
+    local result = run(function() return ctx.adapter.build(materialPlan(100), CFrame.new(),
+        {speed = "Max", infiniteBlocks = true}) end)
+    assert(result.ok, result.message); equal(result.diagnostics.prep_version, 4)
+    equal(ctx.maxPrepScales, 100); equal(result.diagnostics.prep_pending_limit, 100)
+    equal(result.diagnostics.preparation_request_rate, 120); equal(ctx.counters.delete, 1)
+    local calls = {}
+    for _, call in ipairs(ctx.calls) do
+        if call.stage == "scale" and call.args[1].preparation then table.insert(calls, call) end
+    end
+    for i = 2, 100 do near(calls[i].at, calls[1].at) end
+    assert(calls[101].at - calls[1].at >= 100 / 120 - 0.000001)
+end)
+
 print("MOCK_GAME_ADAPTER_TESTS_PASSED " .. tostring(tests))

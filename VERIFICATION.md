@@ -1,6 +1,12 @@
 # Release verification
 
-Version 3.1.4, prepared 2026-11-01.
+Version 3.1.5, prepared 2026-11-01.
+
+Following the user's explicit request to use maximum building speed, 3.1.5 adds Max as the initial speed selection. Max uses the existing 600-request/s and 64-pending ceilings from the start, without latency-based growth or reductions, and expands placement/resize groups to the existing 300-job window size. It shares the Luau.pro preparation method but preserves its separate limits. Painting stays serial at 32 models per call. The shared admission gate, ownership matching, first-block proof, cancellation/manual drains, request timeout, pending locks and final geometry/color checks remain active. Standard Luau.pro and Rapid retain adaptive behavior; Compatible maps Max to Fast. No live build is hot-patched or replayed by publication.
+
+The ongoing 3.1.4 run passed 6,301 verified blocks, beyond the earlier color failure, but its running average at 262.59 wall seconds was about 24 blocks/s with nine workers. That is a partial-run observation, not completed-run validation. Max is a separate fixed-budget choice in response to the user's request; its live performance remains unverified until a new run.
+
+At 60 simulated FPS with 180 ms replies, a 1,201-block deterministic comparison took 33.20 seconds in the preserved 3.1.4 Luau.pro mode and 18.00 seconds in Max. With every 503rd reply taking 1.65 seconds, the same comparison took 37.933 and 22.300 seconds. Both verified all blocks with 2,443 requests and only one paint call active. Max reached but did not exceed 64 pending wall requests. These are local simulations, not a guaranteed game speed.
 
 The live 3.1.3 test caught a regression in overlapping paint: 301 blocks were identified, but verification stopped after 65 completed blocks because color was wrong despite exact geometry. All calls had returned; the color check waited eight seconds. This supports reverting concurrent paint, but does not prove the server's internal cause. Version 3.1.4 restores serial 32-model paint batches and retains the 3.1.3 latency controller. It introduces no automatic repaint, retry, deletion or partial-build resume. A mock that rejects overlapping paint now verifies the serial path. Final wall-only RPC counts and mean latency exclude preparation.
 
@@ -33,7 +39,7 @@ The release is built from the public source tree. It includes all PNG and JPEG l
 Automated checks run with the official Luau CLI and Python/Pillow:
 
 - Complete bundled client, adapter, planner, decoder and loader syntax/compilation.
-- 170 simulated adapter scenarios, including serial paint order, a mock rejecting overlapping paint, prep-excluded wall metrics, rejection, late replies and retained locks, manual tool switching, periodic wall-only progress, cancellation, sparse delay tolerance, sustained/load-dependent congestion, severe delay, recovery and unchanged Rapid behavior. Earlier coverage includes preparation timing, no-surplus inventory and separate cleanup accounting. Phase order, ownership, final geometry/color checks and cancellation remain covered. These use local doubles and send no live game requests.
+- 179 simulated adapter scenarios. Nine Max cases cover 300-block nil-return matching, existing/manual object preservation, fixed slow-reply behavior, ambiguity rejection, cancellation, late locks, manual selection and unchanged preparation. Earlier coverage includes serial paint order, overlap-rejecting paint mocks, prep-excluded wall metrics, periodic progress and adaptive congestion handling. Phase order, ownership and final geometry/color checks remain covered. These use local doubles and send no live game requests.
 - 34 interface logic scenarios covering options, placement rotation/origin, cancellation, progress, reload behavior, normal hotbar selection, the new default, live material counters, wall-only elapsed time and bounded local diagnostics. Terminal snapshots distinguish complete, stopped and unverified outcomes.
 - 34 PNG/wrapper cases, including color types, filters, interlacing, checksums, malformed files, memory bounds, cancellation, and independently verified preview PNG output.
 - 14 JPEG test methods using synthetic Pillow fixtures: baseline/progressive, grayscale/RGB, subsampling, odd dimensions, restart markers, EXIF orientations 1–8, malformed data, scan/table limits, cancellation and cooperative yielding. Lossy output is checked with appropriate tolerance; it is not claimed identical to libjpeg's chroma smoothing.

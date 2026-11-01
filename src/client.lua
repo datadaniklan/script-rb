@@ -34,7 +34,7 @@ local inventoryRefreshing = false
 local generation = 0
 local plan, placeTool, ghost, placement, renderConnection, placementAllowed, placementReason
 local toolConnections, connections, inventory = {}, {}, {}
-local selectedBlock, speed, yaw = nil, "Luau.pro", 0
+local selectedBlock, speed, yaw = nil, "Max", 0
 local toolMode = "background"
 local infiniteBlocks = true
 local qualityIndex = 1
@@ -66,7 +66,7 @@ local qualityPresets = {
 }
 local previewFiles, activePreviewPath = Backend.previewFiles(), nil
 local chosenCount = 0
-local api = {Version = "3.1.4"}
+local api = {Version = "3.1.5"}
 ENV.ImageBuilder = api
 
 local C = {
@@ -196,7 +196,7 @@ sectionTitle(materialCard, "03", "Material & building")
 local blockButton = button(materialCard, "Reading your inventory...", 14, 39, 316, 34)
 local refreshButton = button(materialCard, "Refresh", 338, 39, 88, 34)
 local toolModeButton = button(materialCard, "Tools: Hands free  >", 14, 84, 246, 34)
-local speedButton = button(materialCard, "Speed: Luau.pro  v", 268, 84, 158, 34)
+local speedButton = button(materialCard, "Speed: Max  v", 268, 84, 158, 34)
 local infiniteButton = button(materialCard, "Infinite Blocks: ON  (verify inventory)", 14, 129, 412, 34)
 infiniteButton.TextColor3 = C.green
 local explanation = label(materialCard,
@@ -242,7 +242,7 @@ local blockMenu = create("ScrollingFrame", {
 round(blockMenu, 9)
 create("UIStroke", { Color = C.blue, Thickness = 1 }, blockMenu)
 local speedMenu = create("Frame", {
-    Position = UDim2.fromOffset(294, 170), Size = UDim2.fromOffset(162, 174),
+    Position = UDim2.fromOffset(294, 170), Size = UDim2.fromOffset(162, 207),
     BackgroundColor3 = C.field, BorderSizePixel = 0, Visible = false, ZIndex = 20,
 }, panel)
 round(speedMenu, 9)
@@ -436,7 +436,7 @@ connect(toolModeButton.Activated, function()
     if busy() then return end
     toolMode = toolMode == "compatible" and "background" or "compatible"
     local compatible = toolMode == "compatible"
-    if compatible and (speed == "Rapid" or speed == "Luau.pro") then
+    if compatible and (speed == "Rapid" or speed == "Luau.pro" or speed == "Max") then
         speed = "Fast"
         speedButton.Text = "Speed: Fast  v"
     end
@@ -537,12 +537,12 @@ connect(speedButton.Activated, function()
     anchorMenu(speedMenu, speedButton)
     speedMenu.Visible = not speedMenu.Visible
 end)
-for index, name in ipairs({ "Luau.pro", "Normal", "Fast", "Turbo", "Rapid" }) do
+for index, name in ipairs({ "Max", "Luau.pro", "Normal", "Fast", "Turbo", "Rapid" }) do
     local choice = button(speedMenu, name, 5, 5 + (index - 1) * 33, 152, 29)
     choice.ZIndex = 21
     connect(choice.Activated, function()
         if busy() then return end
-        if (name == "Rapid" or name == "Luau.pro") and toolMode ~= "background" then
+        if (name == "Rapid" or name == "Luau.pro" or name == "Max") and toolMode ~= "background" then
             speedMenu.Visible = false
             setStatus("Select Hands free tools to use " .. name .. " mode.", C.yellow)
             return
@@ -550,7 +550,8 @@ for index, name in ipairs({ "Luau.pro", "Normal", "Fast", "Turbo", "Rapid" }) do
         speed = name
         speedButton.Text = "Speed: " .. name .. "  v"
         speedMenu.Visible = false
-        setStatus(name == "Luau.pro" and "Luau.pro method: prepare material, place, paint, then resize. Uses bounded parallel work and counts only confirmed blocks."
+        setStatus(name == "Max" and "Max starts at full speed and keeps a fixed pace with larger work groups. It waits for game confirmations; only verified blocks count."
+            or name == "Luau.pro" and "Luau.pro method: prepare material, place, paint, then resize. Uses bounded parallel work and counts only confirmed blocks."
             or name == "Rapid" and "Rapid adjusts to the game's response time and slows down when block updates fall behind. Only verified blocks count toward progress."
             or (name == "Turbo" and "Turbo uses bounded parallel requests. The game can still limit build speed." or (name .. " speed selected.")))
     end)
@@ -840,6 +841,7 @@ local function sendTelemetry(buildPlan, ok, result, buildToolMode, buildInfinite
             preparation_status = safeError(diag.preparation_status or ""),
             temporary_block_remaining = diag.temporary_block_remaining,
             speed_mode = safeError(diag.speed_mode or ""),
+            selected_speed_mode = safeError(diag.selected_speed_mode or ""),
             effective_request_rate = tonumber(diag.effective_request_rate),
             peak_pending = tonumber(diag.peak_pending),
             wall_elapsed_seconds = tonumber(diag.wall_elapsed_seconds),

@@ -17,19 +17,21 @@ All filesystem paths are relative, such as `baft image builder/builder_a.lua`. S
 1. Paste a **direct PNG or JPEG image URL**.
 2. Choose wall width, resolution, material, and quality. Select **Convert image**.
 3. Select **Place**, aim the green preview, and click. **R** rotates 90 degrees; **Q/E** rotate 15 degrees.
-4. **Hands free**, **Luau.pro** speed and **Infinite Blocks** are selected initially. Select tools from the game's normal hotbar while building; use **Stop** to cancel. Choose Rapid for the existing adaptive pipeline, or a lower speed if needed.
+4. **Hands free**, **Max** speed and **Infinite Blocks** are selected initially. Select tools from the game's normal hotbar while building; use **Stop** to cancel. Choose Luau.pro or Rapid for adaptive admission, or a lower speed if needed.
 
 Run the same link again to obtain the latest published version. A saved `baft image builder/start.lua` contains the same online launcher. The loader stops visibly on a failed update; it does not silently run an old version. Only one builder operation should run at a time.
 
-## Luau.pro method in version 3.1.4
+## Luau.pro method and Max speed in version 3.1.5
 
 The image-builder adapter now has a **Luau.pro** profile. It ports the recovered material-preparation lifecycle and staged image placement into this builder. It is an independent implementation of those methods; the original Luau.pro engine and its unresolved helper bindings are not bundled or invoked.
 
 - **Material preparation:** when stock is short and Infinite Blocks is enabled, reuse one newly identified helper for up to four top-up rounds, then remove it. Launch each scaling group together, matching the recovered method's within-group timing. Measure the first group before scheduling the remaining work. Check actual inventory both before and after cleanup; image building starts only with sufficient verified material. At least one available block is needed to begin preparation.
-- **Image placement:** place in cohorts of up to 50, identify the new owned models, paint them in serial batches of up to 32, then resize in windows of up to 150. Each paint call must return before the next begins. Larger images use bounded work windows. Position, size, orientation and color must pass the existing final checks before a block counts as completed.
+- **Image placement:** place in cohorts of up to 50 (300 in Max), identify the new owned models, paint them in serial batches of up to 32, then resize in windows of up to 150 (300 in Max). Each paint call must return before the next begins. Larger images use bounded work windows. Position, size, orientation and color must pass the existing final checks before a block counts as completed.
 - **Hands-free operation:** keep the normal game hotbar and manual tool selection, cancellation, tool restoration and protection against starting another build while earlier requests are still unresolved.
 
-The Luau.pro wall profile now adapts to response latency: it starts at 120 requests per second and 16 workers, with ceilings of 600 requests per second and 64 pending requests. Preparation is separate: groups of up to 100 scaling calls are launched together, fully drained before the next group, and paced between groups at an average ceiling of 120 calls per second. These are request limits, not a promised completed-block rate. Rapid remains available. Selecting Compatible tool mode changes either background-only profile to Fast.
+**Max** starts immediately at the existing full budget of 600 requests per second and 64 workers, using 300-block placement/resize groups. It keeps that bounded budget instead of applying latency-based ramp-up or reductions. Server replies, pending capacity, tool transitions, timeouts and final verification still govern actual progress; Max does not mean instantaneous server execution or unlimited requests.
+
+The **Luau.pro** wall profile adapts to response latency: it starts at 120 requests per second and 16 workers, with ceilings of 600 requests per second and 64 pending requests. Preparation is separate in both profiles: groups of up to 100 scaling calls are launched together, fully drained before the next group, and paced between groups at an average ceiling of 120 calls per second. These are request limits, not a promised completed-block rate. Rapid remains available. Selecting Compatible tool mode changes any background-only profile to Fast.
 
 Normal Luau.pro wall admission uses recent response history before reducing concurrency: at least three replies and a majority of the latest 16 replies must be slow. An isolated modest delay no longer halves the worker count. A reply taking four seconds or more still triggers a reduction, and sustained congestion, timeouts and cancellation retain their existing protections. Reductions are spaced by at least two seconds; growth still requires healthy replies and stays within the same ceilings. Rapid and material preparation retain their previous behavior.
 

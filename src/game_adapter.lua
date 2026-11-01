@@ -185,11 +185,16 @@ function Adapter.build(plan, origin, options)
         Fast = {rate = 60, workers = 4, batch = 32}, Turbo = {rate = 120, workers = 8, batch = 64},
         Rapid = {rate = 120, workers = 16, maxRate = 600, maxWorkers = 64, batch = 256, cohort = 16, paint = 32},
         ["Luau.pro"] = {rate = 120, workers = 16, maxRate = 600, maxWorkers = 64,
-            batch = 300, cohort = 50, paint = 32, resize = 150}}
+            batch = 300, cohort = 50, paint = 32, resize = 150},
+        Max = {rate = 600, workers = 64, maxRate = 600, maxWorkers = 64,
+            batch = 300, cohort = 300, paint = 32, resize = 300}}
     local selectedSpeed = presets[options.speed] and options.speed or "Fast"
-    local speedMode = toolMode == "compatible" and (selectedSpeed == "Rapid" or selectedSpeed == "Luau.pro")
+    local schedule = toolMode == "compatible" and (selectedSpeed == "Rapid" or selectedSpeed == "Luau.pro" or selectedSpeed == "Max")
         and "Fast" or selectedSpeed
-    local speed = presets[speedMode]
+    local speed = presets[schedule]
+    -- Max keeps a fixed bounded wall budget and the same verified phase order.
+    -- Other adaptive profiles retain their existing latency-based limits.
+    local speedMode = schedule == "Max" and "Luau.pro" or schedule
     local wallStarted, wallLastReport, wallMessage
     local wallRpcAtStart, wallLatencyAtStart, wallSentAtStart = 0, 0, 0
     local completed, created, nextSend, failure = 0, 0, 0, nil
@@ -276,7 +281,7 @@ function Adapter.build(plan, origin, options)
         diagnostics.adaptive_peak_workers = math.max(diagnostics.adaptive_peak_workers, workers)
     end
     local function slowDown(reason)
-        if speedMode ~= "Rapid" and speedMode ~= "Luau.pro" then return end
+        if schedule == "Max" or speedMode ~= "Rapid" and speedMode ~= "Luau.pro" then return end
         local now = os.clock()
         adaptive.nextIncrease = now + 5
         adaptive.healthyCalls = 0
@@ -299,6 +304,7 @@ function Adapter.build(plan, origin, options)
         adaptive.latency = adaptive.latency and adaptive.latency * 0.8 + elapsed * 0.2 or elapsed
         adaptive.recentMax = math.max(elapsed, adaptive.recentMax * 0.98)
         diagnostics.rpc_latency_ewma_seconds = adaptive.latency
+        if schedule == "Max" then return end
         if speedMode == "Rapid" then
             if elapsed > 1 or adaptive.latency > 0.65 then slowDown()
             elseif elapsed < 0.45 then adaptive.healthyCalls += 1 end
@@ -328,7 +334,7 @@ function Adapter.build(plan, origin, options)
         return budget
     end
     local function growLuauLimits()
-        if speedMode ~= "Luau.pro" or preparing or not adaptive.latency or adaptive.latency >= 0.45
+        if schedule == "Max" or speedMode ~= "Luau.pro" or preparing or not adaptive.latency or adaptive.latency >= 0.45
             or adaptive.healthyCalls < 16 or sustainedLuauLatency() or os.clock() < adaptive.nextIncrease then return end
         local rate, workers = math.min(speed.maxRate, adaptive.rate + 40), math.min(speed.maxWorkers, adaptive.workers + 4)
         if rate ~= adaptive.rate or workers ~= adaptive.workers then
